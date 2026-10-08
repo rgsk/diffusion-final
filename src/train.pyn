@@ -127,7 +127,7 @@ def full_val_loss(
 
 @torch.no_grad()
 def sampled_train_loss(
-    model: UNet, train: Digits, *, batch_size: int, iters: int
+    model: UNet, train_data: Digits, *, batch_size: int, iters: int
 ) -> float:
     # the train split is too big for a full pass, so average a few random batches,
     # each with fresh noise and t
@@ -135,7 +135,8 @@ def sampled_train_loss(
     model.eval()
     losses: list[Tensor] = []
     for _ in range(iters):
-        x0, _ = get_batch(train, batch_size=, device=model.device)  # [B, C, H, W]
+        # x0: [B, C, H, W]
+        x0, _ = get_batch(train_data, batch_size=, device=model.device)
         losses.append(batch_loss(model, flow_batch(x0)))
     model.train(was_training)
     return torch.stack(losses).mean().item()  # one sync, not one per batch
@@ -143,7 +144,7 @@ def sampled_train_loss(
 
 def train(
     model: UNet,
-    (train=, val=): DataSplit,
+    (train_data=, val_data=): DataSplit,
     (
         batch_size=, max_steps=, max_lr=, min_lr=, weight_decay=, grad_clip=,
         warmup_steps=, eval_interval=, eval_iters=,
@@ -165,8 +166,10 @@ def train(
 
     def evaluate(step: int):
         nonlocal best_val_loss, best_step, max_grad_norm
-        train_loss = sampled_train_loss(model, train, batch_size=, iters=eval_iters)
-        val_loss = full_val_loss(model, val.images, batch_size=)
+        train_loss = sampled_train_loss(
+            model, train_data, batch_size=, iters=eval_iters
+        )
+        val_loss = full_val_loss(model, val_data.images, batch_size=)
         lr: float = opt.param_groups[0]["lr"]  # the lr of the latest step
         # nan at step 0 because no step has run yet
         grad_norm = max_grad_norm.item() if step > 0 else math.nan
@@ -201,8 +204,8 @@ def train(
             group["lr"] = lr
         if step % eval_interval == 0:
             evaluate(step)
-        # labels unused until the model is class-conditioned
-        x0, _ = get_batch(train, batch_size=, device=model.device)  # [B, C, H, W]
+        # x0: [B, C, H, W]; labels unused until the model is class-conditioned
+        x0, _ = get_batch(train_data, batch_size=, device=model.device)
         grad_norm = train_step(model, opt, flow_batch(x0), grad_clip=)
         max_grad_norm = torch.maximum(max_grad_norm, grad_norm)
     evaluate(max_steps)

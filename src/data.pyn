@@ -9,7 +9,7 @@ from paths import DATA_DIR
 
 # images: [N, 1, 28, 28] float in [-1, 1], labels: [N] long, 0-9
 type Digits = (images: Tensor, labels: Tensor)
-type DataSplit = (train: Digits, val: Digits)
+type DataSplit = (train_data: Digits, val_data: Digits)
 
 
 def to_unit_range(pixels: Tensor) -> Tensor:
@@ -31,7 +31,8 @@ def load_mnist(*, train: bool, root: Path = DATA_DIR) -> Digits:
 def split(root: Path = DATA_DIR) -> DataSplit:
     # MNIST's own test set as val, so val digits are never trained on
     return (
-        train=load_mnist(train=True, root=), val=load_mnist(train=False, root=)
+        train_data=load_mnist(train=True, root=),
+        val_data=load_mnist(train=False, root=),
     )
 
 
@@ -54,12 +55,12 @@ def get_batch(
 
 if __name__ == "__main__":
     torch.manual_seed(1)
-    (train=, val=) = split()
-    print(f"train {len(train.images):,}  val {len(val.images):,}")
-    print(f"pixels in [{train.images.min():.0f}, {train.images.max():.0f}]")
+    (train_data=, val_data=) = split()
+    print(f"train {len(train_data.images):,}  val {len(val_data.images):,}")
+    print(f"pixels in [{train_data.images.min():.0f}, {train_data.images.max():.0f}]")
 
     # a batch drawn in the terminal: any ink (above the -1 background) is #
-    x, y = get_batch(train, batch_size=2)  # [2, 1, 28, 28], [2]
+    x, y = get_batch(train_data, batch_size=2)  # [2, 1, 28, 28], [2]
     for img, label in zip(x, y):
         print(f"label {label.item()}")
         for row in img[0]:  # [28]

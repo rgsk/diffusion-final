@@ -25,13 +25,13 @@ from train import (
 
 def test_fresh_model_loss_is_predicting_zero(model: UNet, data: DataSplit):
     # zero-init output, so the loss is exactly the target's mean square
-    batch = flow_batch(data.train.images[:16])
+    batch = flow_batch(data.train_data.images[:16])
     expected = batch.target.pow(2).mean()  # []
     assert batch_loss(model, batch).item() == pytest.approx(expected.item())
 
 
 def test_batch_loss_is_mse_of_the_velocity(awake: UNet, data: DataSplit):
-    batch = flow_batch(data.train.images[:16])
+    batch = flow_batch(data.train_data.images[:16])
     v = awake(batch.x_t, batch.t)  # [16, 1, 28, 28]
     per_image = [F.mse_loss(v[b], batch.target[b]) for b in range(16)]  # 16 x []
     expected = torch.stack(per_image).mean()  # equal sizes, so the mean of means
@@ -39,7 +39,7 @@ def test_batch_loss_is_mse_of_the_velocity(awake: UNet, data: DataSplit):
 
 
 def test_autocast_is_off_on_cpu(awake: UNet, data: DataSplit):
-    batch = flow_batch(data.train.images[:2])
+    batch = flow_batch(data.train_data.images[:2])
     with autocast(batch.x_t.device):
         assert awake(batch.x_t, batch.t).dtype == torch.float32
 
@@ -47,7 +47,7 @@ def test_autocast_is_off_on_cpu(awake: UNet, data: DataSplit):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="bf16 autocast is GPU-only")
 def test_batch_loss_runs_in_bf16_on_gpu(awake: UNet, data: DataSplit):
     awake.to("cuda")
-    batch = flow_batch(data.train.images[:16].to("cuda"))
+    batch = flow_batch(data.train_data.images[:16].to("cuda"))
     # record the dtype the velocity comes out in, inside batch_loss
     out_dtypes: list[torch.dtype] = []
     awake.conv_out.register_forward_hook(
@@ -64,12 +64,12 @@ def test_batch_loss_runs_in_bf16_on_gpu(awake: UNet, data: DataSplit):
 
 def test_full_val_loss_is_the_same_every_eval(awake: UNet, data: DataSplit):
     # fixed noise and t, so an unchanged model scores exactly the same
-    first = full_val_loss(awake, data.val.images, batch_size=8)
-    assert full_val_loss(awake, data.val.images, batch_size=8) == first
+    first = full_val_loss(awake, data.val_data.images, batch_size=8)
+    assert full_val_loss(awake, data.val_data.images, batch_size=8) == first
 
 
 def test_full_val_loss_is_batch_loss_on_the_seeded_batch(awake: UNet, data: DataSplit):
-    images = data.val.images  # [32, 1, 28, 28]
+    images = data.val_data.images  # [32, 1, 28, 28]
     batch = flow_batch(images, generator=torch.Generator().manual_seed(0))
     all_at_once = batch_loss(awake, batch).item()
     assert full_val_loss(awake, images, batch_size=1000, seed=0) == pytest.approx(
@@ -83,7 +83,7 @@ def test_full_val_loss_does_not_depend_on_batch_size(
 ):
     # noise and t are drawn for the whole split before batching, so each image
     # keeps its own whatever the batches are
-    images = data.val.images
+    images = data.val_data.images
     one_batch = full_val_loss(awake, images, batch_size=1000)
     assert full_val_loss(awake, images, batch_size=) == pytest.approx(
         one_batch, rel=1e-5
@@ -91,7 +91,7 @@ def test_full_val_loss_does_not_depend_on_batch_size(
 
 
 def test_full_val_loss_depends_on_seed(awake: UNet, data: DataSplit):
-    images = data.val.images
+    images = data.val_data.images
     a = full_val_loss(awake, images, batch_size=8, seed=0)
     assert full_val_loss(awake, images, batch_size=8, seed=1) != a
 
@@ -101,18 +101,18 @@ def test_full_val_loss_leaves_the_global_rng_alone(awake: UNet, data: DataSplit)
     torch.manual_seed(5)
     expected = torch.rand(3)
     torch.manual_seed(5)
-    full_val_loss(awake, data.val.images, batch_size=8)
+    full_val_loss(awake, data.val_data.images, batch_size=8)
     assert torch.equal(torch.rand(3), expected)
 
 
 def test_sampled_train_loss_is_mean_of_random_batches(awake: UNet, data: DataSplit):
     # same seed twice, so these are the exact batches and noise it drew
     torch.manual_seed(0)
-    sampled = sampled_train_loss(awake, data.train, batch_size=4, iters=5)
+    sampled = sampled_train_loss(awake, data.train_data, batch_size=4, iters=5)
     torch.manual_seed(0)
     losses = []  # 5 x []
     for _ in range(5):
-        x0, _ = get_batch(data.train, batch_size=4)  # [4, 1, 28, 28]
+        x0, _ = get_batch(data.train_data, batch_size=4)  # [4, 1, 28, 28]
         losses.append(batch_loss(awake, flow_batch(x0)))
     expected = torch.stack(losses).mean()  # []
     assert sampled == pytest.approx(expected.item(), rel=1e-5)
@@ -121,9 +121,9 @@ def test_sampled_train_loss_is_mean_of_random_batches(awake: UNet, data: DataSpl
 @pytest.mark.parametrize("training", [True, False])
 def test_evaluation_restores_mode(model: UNet, data: DataSplit, training: bool):
     model.train(training)
-    full_val_loss(model, data.val.images, batch_size=8)
+    full_val_loss(model, data.val_data.images, batch_size=8)
     assert model.training is training
-    sampled_train_loss(model, data.train, batch_size=4, iters=2)
+    sampled_train_loss(model, data.train_data, batch_size=4, iters=2)
     assert model.training is training
 
 
@@ -205,7 +205,7 @@ def test_train_step_scales_a_long_gradient_down_to_grad_clip(
     opt = torch.optim.AdamW(awake.parameters())
     grad_clip = 0.01  # far below an untrained model's grad norm
     grad_norm = train_step(
-        awake, opt, flow_batch(data.train.images[:16]), grad_clip=
+        awake, opt, flow_batch(data.train_data.images[:16]), grad_clip=
     )
     assert grad_norm.item() > grad_clip
     # .grad still holds what opt.step() used, clipped to norm grad_clip
@@ -216,7 +216,7 @@ def test_train_step_leaves_a_short_gradient_alone(awake: UNet, data: DataSplit):
     opt = torch.optim.AdamW(awake.parameters())
     grad_clip = 1e6  # far above any grad norm here
     grad_norm = train_step(
-        awake, opt, flow_batch(data.train.images[:16]), grad_clip=
+        awake, opt, flow_batch(data.train_data.images[:16]), grad_clip=
     )
     assert grad_norm_now(awake) == pytest.approx(grad_norm.item(), rel=1e-5)
 

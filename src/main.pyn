@@ -20,10 +20,10 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # tf32: float32 matmuls on tensor cores, rounding inputs to 10 mantissa bits
     torch.set_float32_matmul_precision("high")
-    (train=train_set, val=val_set) = split()
+    (train_data=, val_data=) = split()
     # all of MNIST on the device (~220MB), so a batch is an index, not a copy
     data: DataSplit = (
-        train=to_device(train_set, device), val=to_device(val_set, device)
+        train_data=to_device(train_data, device), val_data=to_device(val_data, device)
     )
 
     unet_cfg: UNetConfig = (

@@ -49,11 +49,12 @@ def test_images_and_labels_same_length(digits: Digits):
 
 @pytest.mark.slow
 def test_mnist_sizes_and_types():
-    (train=, val=) = split()
-    assert train.images.shape == (60_000, 1, 28, 28)
-    assert val.images.shape == (10_000, 1, 28, 28)
-    assert train.labels.shape == (60_000,)
-    assert (train.images.dtype, train.labels.dtype) == (torch.float32, torch.long)
+    (train_data=, val_data=) = split()
+    assert train_data.images.shape == (60_000, 1, 28, 28)
+    assert val_data.images.shape == (10_000, 1, 28, 28)
+    assert train_data.labels.shape == (60_000,)
+    assert train_data.images.dtype == torch.float32
+    assert train_data.labels.dtype == torch.long
 
 
 @pytest.mark.slow

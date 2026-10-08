@@ -39,7 +39,7 @@ def data() -> DataSplit:
     def repeat(n: int) -> Digits:
         return (images=patterns.repeat(n, 1, 1, 1), labels=labels.repeat(n))
 
-    return (train=repeat(16), val=repeat(8))
+    return (train_data=repeat(16), val_data=repeat(8))
 
 
 @pytest.fixture
