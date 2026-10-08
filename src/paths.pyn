@@ -13,4 +13,5 @@ def repo_root() -> Path:
 ROOT = repo_root()
 DATA_DIR = ROOT / "data"  # torchvision keeps MNIST in data/MNIST/raw
 CKPT_DIR = ROOT / "artifacts" / "checkpoints"  # artifacts/ is gitignored
+SAMPLES_DIR = ROOT / "artifacts" / "samples"  # one grid per run and step count
 LOG_DIR = ROOT / "artifacts" / "logs"  # .log and .jsonl per run, wandb's run folders

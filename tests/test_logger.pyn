@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 import wandb
 
 from data import DataSplit
 from logger import EvalRow, Run
 from model import UNet
+from sample import save_grid
 from train import TrainConfig, train
 
 
@@ -136,3 +138,12 @@ def test_ctrl_c_ends_the_log_with_one_line_not_a_traceback(tmp_path: Path):
         "error": "KeyboardInterrupt",
         "traceback": None,
     }
+
+
+def test_log_images_records_paths(tmp_path: Path):
+    grid = tmp_path / "grid.png"
+    save_grid(torch.rand(4, 1, 8, 8) * 2 - 1, grid, nrow=2)
+    with Run("test", {}, online=False, log_dir=tmp_path) as run:
+        run.log_images({"samples/steps_10": grid}, step=3)
+    _, images, _ = read_lines(run)
+    assert images == {"event": "images", "step": 3, "samples/steps_10": str(grid)}

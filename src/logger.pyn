@@ -121,6 +121,16 @@ class Run:
         self.write({"event": "log", "step": step, **metrics})
         self.wandb_run.log(metrics, step=)
 
+    def log_images(self, images: dict[str, Path], *, step: int):
+        # image files (sample grids) by name, into wandb's media panel at step.
+        # The .jsonl keeps their paths, since the files are already on disk
+        self.write(
+            {"event": "images", "step": step, **{k: str(p) for k, p in images.items()}}
+        )
+        self.wandb_run.log(
+            {k: wandb.Image(str(p)) for k, p in images.items()}, step=
+        )
+
     def summary(self, **numbers: float):
         # one number each for the whole run, which the wandb runs table sorts on
         self.write({"event": "summary", **numbers})

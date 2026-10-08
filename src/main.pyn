@@ -1,0 +1,62 @@
+# end to end on MNIST. Train a UNet to predict flow velocity, keep the best
+# checkpoint, then sample digits from it at a few step counts
+import torch
+
+from checkpoint import load_checkpoint
+from data import DataSplit, Digits, split
+from logger import Run
+from model import UNet, UNetConfig
+from paths import CKPT_DIR, ROOT, SAMPLES_DIR
+from sample import sample, save_grid
+from train import TrainConfig, train
+
+
+def to_device((images=, labels=): Digits, device: str) -> Digits:
+    return (images=images.to(device), labels=labels.to(device))
+
+
+if __name__ == "__main__":
+    torch.manual_seed(1337)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # tf32: float32 matmuls on tensor cores, rounding inputs to 10 mantissa bits
+    torch.set_float32_matmul_precision("high")
+    (train=train_set, val=val_set) = split()
+    # all of MNIST on the device (~220MB), so a batch is an index, not a copy
+    data: DataSplit = (
+        train=to_device(train_set, device), val=to_device(val_set, device)
+    )
+
+    unet_cfg: UNetConfig = (
+        in_channels=1, channels=(64, 128, 128), time_dim=256, groups=8
+    )
+    train_cfg: TrainConfig = (
+        batch_size=128, max_steps=10_000,
+        max_lr=2e-3, min_lr=2e-4,
+        weight_decay=0.0, grad_clip=1.0,
+        warmup_steps=200,
+        eval_interval=500, eval_iters=20,
+    )
+    model = UNet(unet_cfg).to(device)
+    ckpt_path = CKPT_DIR / "main.pt"
+    # every hyperparameter, for wandb's config table
+    config = {**unet_cfg, **train_cfg}
+    with Run("main", config) as run:
+        train(
+            model, data, train_cfg, save_best=(path=ckpt_path, unet_cfg=), run=
+        )
+        run.log_checkpoint(ckpt_path)  # the best, since save_best overwrote the rest
+
+        # inside the run, so the lines land in its .log too.
+        # the best val loss can come before the last step, so sample from that model
+        (model=, step=, val_loss=) = load_checkpoint(ckpt_path, device=)
+        print(f"best checkpoint: step {step}, val {val_loss:.3f}")
+
+        # the same noise at every step count, so the grids differ only by steps
+        noise = torch.randn(64, 1, 28, 28, device=)  # [64, 1, 28, 28]
+        grids = {}
+        for steps in (2, 10, 50):
+            path = SAMPLES_DIR / f"{run.name}_steps{steps}.png"
+            save_grid(sample(model, noise, steps=), path)
+            grids[f"samples/steps_{steps}"] = path
+            print(f"saved {path.relative_to(ROOT)}")
+        run.log_images(grids, step=train_cfg.max_steps)
