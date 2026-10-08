@@ -1,0 +1,142 @@
+# the UNet top to bottom: time embedding, ResBlock, shapes, zero init, what the
+# output depends on, and that it can learn at all
+import pytest
+import torch
+import torch.nn.functional as F
+from torch import Tensor, nn
+
+from flow import flow_batch
+from model import ResBlock, UNet, UNetConfig, time_embedding
+
+
+def images(n: int = 4) -> Tensor:
+    return torch.randn(n, 1, 28, 28)
+
+
+def test_time_embedding_shape_and_range():
+    emb = time_embedding(torch.rand(5), 32)  # [5, 32]
+    assert emb.shape == (5, 32)
+    assert emb.abs().max() <= 1  # sin and cos
+
+
+def test_time_embedding_at_zero():
+    # every angle is 0: the sin half is 0 and the cos half is 1
+    emb = time_embedding(torch.zeros(1), 8)  # [1, 8]
+    assert torch.equal(emb[0], torch.tensor([0.0] * 4 + [1.0] * 4))
+
+
+def test_time_embedding_tells_nearby_t_apart():
+    # 1000 sampling steps are 0.001 apart in t; TIME_SCALE makes that a full
+    # radian on the fastest channel, so neighbouring steps look different.
+    # Unscaled, the step would move every channel by at most 0.001
+    a, b = time_embedding(torch.tensor([0.5, 0.501]), 64)  # each [64]
+    assert (a - b).norm() > 0.5
+
+
+def test_time_embedding_odd_dim_fails():
+    with pytest.raises(AssertionError, match="time embedding dim 7 is odd"):
+        time_embedding(torch.zeros(1), 7)
+
+
+def test_resblock_starts_as_its_skip():
+    temb = torch.randn(2, 32)
+    x = torch.randn(2, 8, 7, 7)
+    same = ResBlock(8, 8, time_dim=32, groups=4)
+    assert torch.equal(same(x, temb), x)  # identity skip
+    wide = ResBlock(8, 16, time_dim=32, groups=4)
+    assert torch.equal(wide(x, temb), wide.skip(x))  # 1x1 conv skip
+    assert isinstance(wide.skip, nn.Conv2d)
+
+
+def test_output_shape(model: UNet):
+    x = images(4)
+    assert model(x, torch.rand(4)).shape == x.shape
+
+
+def test_fresh_model_predicts_zero(model: UNet):
+    # zero-init conv_out: the first loss is exactly E[target^2]
+    assert torch.equal(model(images(), torch.rand(4)), torch.zeros(4, 1, 28, 28))
+
+
+def test_output_depends_on_t(awake: UNet):
+    x = images(4)
+    assert not torch.allclose(awake(x, torch.zeros(4)), awake(x, torch.ones(4)))
+
+
+def test_images_dont_mix(awake: UNet):
+    # GroupNorm normalizes each image on its own, so a batch gives the same
+    # result as one image at a time
+    x, t = images(4), torch.rand(4)
+    batched = awake(x, t)  # [4, 1, 28, 28]
+    alone = torch.cat([awake(x[i : i + 1], t[i : i + 1]) for i in range(4)])
+    assert torch.allclose(batched, alone, atol=1e-5)
+
+
+def test_every_pixel_sees_far_pixels(awake: UNet):
+    # three levels reach across the whole 28x28 image, so changing the top-left
+    # pixel moves the output at the bottom-right
+    x, t = images(1), torch.rand(1)
+    changed = x.clone()
+    changed[0, 0, 0, 0] += 1
+    assert awake(x, t)[0, 0, -1, -1] != awake(changed, t)[0, 0, -1, -1]
+
+
+def test_size_must_divide_by_halvings(model: UNet):
+    with pytest.raises(
+        AssertionError, match="H, W 30x30 must divide by 4 for 3 levels"
+    ):
+        model(torch.randn(1, 1, 30, 30), torch.rand(1))
+
+
+def test_t_must_be_one_per_image(model: UNet):
+    with pytest.raises(
+        AssertionError, match=r"t must be \[4\], one per image, got \[4, 1\]"
+    ):
+        model(images(4), torch.rand(4, 1))
+
+
+def test_other_sizes(cfg: UNetConfig):
+    # anything divisible by 4 for 3 levels, not only 28
+    model = UNet(cfg)
+    assert model(torch.randn(2, 1, 16, 32), torch.rand(2)).shape == (2, 1, 16, 32)
+
+
+def test_device_follows_to(model: UNet):
+    assert model.device == torch.device("cpu")
+    model.to("meta")  # shapes but no data, so the move needs no GPU
+    assert model.device == torch.device("meta")
+
+
+def test_every_parameter_learns(model: UNet):
+    # zero init blocks gradient one layer at a time. Step 1 gives conv_out a
+    # gradient, so it turns nonzero; step 2 then reaches each block's conv2;
+    # step 3 reaches what sits behind conv2 (conv1, time_proj, time_mlp). By the
+    # third backward no parameter may still be stuck at a zero gradient
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+    x0 = images(4)
+    for _ in range(3):
+        opt.zero_grad()
+        (x_t=, t=, target=) = flow_batch(x0)
+        F.mse_loss(model(x_t, t), target).backward()
+        opt.step()
+    dead = [
+        n
+        for n, p in model.named_parameters()
+        if p.grad is None or p.grad.abs().max() == 0
+    ]
+    assert dead == []
+
+
+@pytest.mark.slow
+def test_overfits_one_batch(model: UNet):
+    # same x0, noise and t every step: a model that can learn drives this down
+    x0 = images(4)
+    (x_t=, t=, target=) = flow_batch(x0)
+    opt = torch.optim.Adam(model.parameters(), lr=3e-3)
+    first = F.mse_loss(model(x_t, t), target).item()
+    for _ in range(100):
+        opt.zero_grad()
+        F.mse_loss(model(x_t, t), target).backward()
+        opt.step()
+    last = F.mse_loss(model(x_t, t), target).item()
+    assert last < 0.3 * first

@@ -1,0 +1,27 @@
+# the tiny UNet every test file shares; conftest.py re-exports these
+import pytest
+import torch
+
+from model import UNet, UNetConfig
+
+
+@pytest.fixture
+def cfg() -> UNetConfig:
+    # 3 levels: 28 -> 14 -> 7, as the real model
+    return (in_channels=1, channels=(8, 16, 16), time_dim=32, groups=4)
+
+
+@pytest.fixture
+def model(cfg: UNetConfig) -> UNet:
+    return UNet(cfg)
+
+
+@pytest.fixture
+def awake(cfg: UNetConfig) -> UNet:
+    # zero-init layers make a fresh model output exactly 0, which hides whether
+    # anything reaches the output; nudging every weight off its init wakes them
+    m = UNet(cfg)
+    with torch.no_grad():
+        for p in m.parameters():
+            p.add_(0.1 * torch.randn_like(p))
+    return m
