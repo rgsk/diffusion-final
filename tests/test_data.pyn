@@ -1,0 +1,66 @@
+# to_unit_range, get_batch on made-up digits, and the real MNIST files. In the
+# made-up set every pixel of image i equals i and its label is i too, so a
+# batch shows exactly which rows it drew
+import pytest
+import torch
+
+from data import Digits, get_batch, load_mnist, split, to_unit_range
+
+
+@pytest.fixture
+def digits() -> Digits:
+    n = 50
+    images = torch.arange(n).float().view(n, 1, 1, 1).expand(n, 1, 28, 28)
+    return (images=, labels=torch.arange(n))  # [50, 1, 28, 28], [50]
+
+
+def test_unit_range_ends_and_middle():
+    pixels = torch.tensor([0, 51, 255], dtype=torch.uint8).view(1, 1, 3)  # [1, 1, 3]
+    x = to_unit_range(pixels)  # [1, 1, 1, 3]
+    assert x.shape == (1, 1, 1, 3)
+    assert torch.allclose(x.flatten(), torch.tensor([-1.0, -0.6, 1.0]))
+
+
+def test_batch_shape(digits: Digits):
+    x, y = get_batch(digits, batch_size=8)  # [8, 1, 28, 28], [8]
+    assert x.shape == (8, 1, 28, 28)
+    assert y.shape == (8,)
+    assert (x.dtype, y.dtype) == (torch.float32, torch.long)
+
+
+def test_labels_match_their_images(digits: Digits):
+    x, y = get_batch(digits, batch_size=1000)  # [1000, 1, 28, 28], [1000]
+    # image i is all i, so each image's pixels say which row it came from
+    assert torch.equal(x[:, 0, 0, 0].long(), y)
+    assert torch.equal(x, x[:, :, :1, :1].expand_as(x))  # rows not mixed
+
+
+def test_batches_cover_the_set(digits: Digits):
+    # 1000 draws from 50 rows: missing one has odds 50 * (49/50)^1000, about 1e-7
+    _, y = get_batch(digits, batch_size=1000)  # [1000]
+    assert set(y.tolist()) == set(range(50))
+
+
+def test_images_and_labels_same_length(digits: Digits):
+    short = digits._replace(labels=digits.labels[:-1])  # 49 labels
+    with pytest.raises(AssertionError, match="50 images but 49 labels"):
+        get_batch(short, batch_size=1)
+
+
+@pytest.mark.slow
+def test_mnist_sizes_and_types():
+    (train=, val=) = split()
+    assert train.images.shape == (60_000, 1, 28, 28)
+    assert val.images.shape == (10_000, 1, 28, 28)
+    assert train.labels.shape == (60_000,)
+    assert (train.images.dtype, train.labels.dtype) == (torch.float32, torch.long)
+
+
+@pytest.mark.slow
+def test_mnist_pixel_range_and_labels():
+    (images=, labels=) = load_mnist(train=False)
+    # background is exactly -1 and stroke centres reach exactly 1
+    assert images.min() == -1.0 and images.max() == 1.0
+    assert set(labels.tolist()) == set(range(10))
+    # mostly background: MNIST is about 19% ink
+    assert 0.1 < (images > -1).float().mean() < 0.3

@@ -1,0 +1,66 @@
+# MNIST as in-memory tensors -> train/val split and random training batches
+from pathlib import Path
+
+import torch
+from torch import Tensor
+from torchvision.datasets import MNIST
+
+from paths import DATA_DIR
+
+# images: [N, 1, 28, 28] float in [-1, 1], labels: [N] long, 0-9
+type Digits = (images: Tensor, labels: Tensor)
+type DataSplit = (train: Digits, val: Digits)
+
+
+def to_unit_range(pixels: Tensor) -> Tensor:
+    # pixels: [N, 28, 28] uint8, 0-255
+    # out: [N, 1, 28, 28] float, 0 -> -1 and 255 -> 1
+    # [-1, 1], centred on 0 like the noise the flow starts from
+    x = pixels.float() / 255  # [N, 28, 28], 0 -> 1
+    return (x * 2 - 1).unsqueeze(1)  # [N, 1, 28, 28], one channel
+
+
+def load_mnist(*, train: bool, root: Path = DATA_DIR) -> Digits:
+    # train: the 60k training set, else the 10k test set.
+    # torchvision only downloads and parses the files; its .data and .targets
+    # are the whole set as two tensors, so no transforms and no DataLoader
+    ds = MNIST(root, train=, download=True)
+    return (images=to_unit_range(ds.data), labels=ds.targets)
+
+
+def split(root: Path = DATA_DIR) -> DataSplit:
+    # MNIST's own test set as val, so val digits are never trained on
+    return (
+        train=load_mnist(train=True, root=), val=load_mnist(train=False, root=)
+    )
+
+
+def get_batch(
+    (images=, labels=): Digits,
+    *,
+    batch_size: int,
+    device: str | torch.device = "cpu",
+):
+    # images: [N, 1, 28, 28], labels: [N]
+    # out: x [B, 1, 28, 28], y [B]
+    assert len(images) == len(labels), f"{len(images)} images but {len(labels)} labels"
+    # random rows, with replacement, as llm-final's random windows
+    ix = torch.randint(len(images), (batch_size,))  # [B]
+    # the same rows from both, so y[b] is the digit drawn in x[b]
+    x = images[ix]  # [B, 1, 28, 28]
+    y = labels[ix]  # [B]
+    return (x := x.to(device), y := y.to(device))
+
+
+if __name__ == "__main__":
+    torch.manual_seed(1)
+    (train=, val=) = split()
+    print(f"train {len(train.images):,}  val {len(val.images):,}")
+    print(f"pixels in [{train.images.min():.0f}, {train.images.max():.0f}]")
+
+    # a batch drawn in the terminal: any ink (above the -1 background) is #
+    x, y = get_batch(train, batch_size=2)  # [2, 1, 28, 28], [2]
+    for img, label in zip(x, y):
+        print(f"label {label.item()}")
+        for row in img[0]:  # [28]
+            print("".join("#" if p > -1 else "." for p in row))

@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# tool caches
+.pytest_cache/
+.ruff_cache/
+
+# MNIST, ~65MB; load_mnist downloads it when missing
+data/
+
+# run outputs
+artifacts/
+wandb/
+temp/
+
+scratch.pyn
+practice.ipynb
+rough.ipynb
+features.ipynb
