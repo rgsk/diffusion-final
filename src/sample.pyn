@@ -1,0 +1,64 @@
+# sampling: walk the flow backwards from noise (t = 1) to data (t = 0) by
+# integrating dx/dt = v(x, t) with Euler steps, then save the images as a grid
+from collections.abc import Callable
+from itertools import pairwise
+from pathlib import Path
+
+import torch
+from einops import rearrange
+from torch import Tensor
+from torchvision.utils import save_image
+
+# what the sampler integrates: (x_t [B, C, H, W], t [B]) -> v [B, C, H, W].
+# A UNet is one; so is gaussian_velocity, the exact answer the tests check against
+type Velocity = Callable[[Tensor, Tensor], Tensor]
+
+
+@torch.no_grad()
+def sample(velocity: Velocity, noise: Tensor, *, steps: int) -> Tensor:
+    # noise: [B, C, H, W], the starting point at t = 1
+    # out: [B, C, H, W], the point reached at t = 0
+    # steps equal intervals from t = 1 down to t = 0, one velocity call each,
+    # evaluated at the interval's start. dt is negative: walking back to the data
+    assert steps >= 1, f"steps must be at least 1, got {steps}"
+    ts = torch.linspace(1, 0, steps + 1, device=noise.device)  # [steps + 1]
+    x = noise
+    for t, t_next in pairwise(ts):  # each [], one interval
+        v = velocity(x, t.expand(len(x)))  # [B, C, H, W], one t per image
+        x = x + (t_next - t) * v
+    return x
+
+
+def gaussian_velocity(mu: float, sd: float) -> Velocity:
+    # the exact velocity when every pixel of the data is drawn from N(mu, sd^2):
+    # the best any trained model could do, with no training. x0 and noise are
+    # independent Gaussians, so x_t and v = noise - x0 are jointly Gaussian and
+    #   E[v | x_t] = E[v] + Cov(v, x_t) / Var(x_t) * (x_t - E[x_t])
+    # with E[v] = -mu, E[x_t] = (1 - t) mu, Var(x_t) = (1 - t)^2 sd^2 + t^2 and
+    # Cov(v, x_t) = t - (1 - t) sd^2. Sampling with it must give back N(mu, sd^2)
+    def velocity(x: Tensor, t: Tensor) -> Tensor:
+        t = rearrange(t, "B -> B 1 1 1")
+        var = (1 - t) ** 2 * sd**2 + t**2
+        cov = t - (1 - t) * sd**2
+        return -mu + cov / var * (x - (1 - t) * mu)
+
+    return velocity
+
+
+def save_grid(images: Tensor, path: Path, *, nrow: int = 8) -> None:
+    # images: [B, C, H, W] in [-1, 1]; anything outside is clipped to black or white
+    # nrow images per row, 2 px of padding between them
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_image(images, path, nrow=, normalize=True, value_range=(-1, 1))
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    # Gaussian data with a known velocity: how close each step count gets
+    mu, sd = 2.0, 0.5
+    velocity = gaussian_velocity(mu, sd)
+    noise = torch.randn(20_000, 1, 1, 1)
+    print(f"target  mean {mu:.3f}  std {sd:.3f}")
+    for steps in (1, 2, 5, 10, 50, 200):
+        x = sample(velocity, noise, steps=)
+        print(f"steps {steps:>3}  mean {x.mean():.3f}  std {x.std():.3f}")

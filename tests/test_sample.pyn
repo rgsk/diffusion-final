@@ -1,0 +1,108 @@
+# the Euler sampler: its time grid, exactness against a known velocity, what
+# fewer steps cost, and the saved grid
+from pathlib import Path
+
+import pytest
+import torch
+from PIL import Image
+from torch import Tensor
+
+from model import UNet
+from sample import gaussian_velocity, sample, save_grid
+
+MU, SD = 2.0, 0.5
+
+
+@pytest.fixture
+def noise() -> Tensor:
+    return torch.randn(20_000, 1, 1, 1)
+
+
+def test_visits_t_from_1_down_to_just_above_0():
+    # each interval's velocity is taken at its start, so t = 0 itself is never asked
+    seen: list[Tensor] = []
+
+    def record(x: Tensor, t: Tensor) -> Tensor:
+        seen.append(t)
+        return torch.zeros_like(x)
+
+    sample(record, torch.randn(3, 1, 2, 2), steps=4)
+    assert all(t.shape == (3,) for t in seen)  # one t per image
+    assert [t[0].item() for t in seen] == [1.0, 0.75, 0.5, 0.25]
+
+
+def test_zero_velocity_leaves_noise_alone(model: UNet):
+    # a fresh UNet predicts v = 0, so nothing moves
+    noise = torch.randn(2, 1, 28, 28)
+    assert torch.equal(sample(model, noise, steps=3), noise)
+
+
+def test_constant_velocity_is_exact_in_one_step():
+    # a straight line at constant speed: Euler is exact, whatever the step count
+    noise = torch.randn(4, 1, 2, 2)
+    v = torch.randn(4, 1, 2, 2)
+    for steps in (1, 7):
+        x = sample(lambda x, t: v, noise, steps=)
+        assert torch.allclose(x, noise - v, atol=1e-6)
+
+
+def test_gaussian_velocity_at_the_ends():
+    # forced values, no algebra needed: at t = 1 x is the noise, so v = x - mu;
+    # at t = 0 x is the data, so v = E[noise] - x = -x
+    v = gaussian_velocity(MU, SD)
+    x = torch.randn(100, 1, 1, 1)
+    assert torch.allclose(v(x, torch.ones(100)), x - MU, atol=1e-6)
+    assert torch.allclose(v(x, torch.zeros(100)), -x, atol=1e-6)
+
+
+def test_many_steps_give_back_the_data_distribution(noise: Tensor):
+    # with the exact velocity, sampling must reproduce N(MU, SD^2); this pins
+    # the direction of time, the sign of dt and the grid all at once.
+    # std of the mean at n = 20000 is 0.5 / 141, about 0.004
+    x = sample(gaussian_velocity(MU, SD), noise, steps=200)
+    assert x.mean().item() == pytest.approx(MU, abs=0.02)
+    assert x.std().item() == pytest.approx(SD, abs=0.01)
+
+
+def test_one_step_collapses_to_the_mean(noise: Tensor):
+    # at t = 1 the noise says nothing about which x0, so the velocity points at
+    # the data mean, and one full step lands every sample on it
+    x = sample(gaussian_velocity(MU, SD), noise, steps=1)
+    assert torch.allclose(x, torch.full_like(x, MU), atol=1e-5)
+
+
+def test_fewer_steps_lose_spread_not_mean(noise: Tensor):
+    # Euler's error on this curved flow: each step overshoots toward the mean, so
+    # the spread is short and closes as steps grow; the mean stays put
+    stds = []
+    for steps in (2, 5, 10, 50, 200):
+        x = sample(gaussian_velocity(MU, SD), noise, steps=)
+        assert x.mean().item() == pytest.approx(MU, abs=0.02)
+        stds.append(x.std().item())
+    assert stds == sorted(stds)  # rises with every increase in steps
+    assert stds[0] < 0.5 * SD  # 2 steps: under half the spread
+    assert stds[3] > 0.95 * SD  # 50 steps: within 5%
+
+
+def test_steps_must_be_positive():
+    with pytest.raises(AssertionError, match="steps must be at least 1, got 0"):
+        sample(gaussian_velocity(MU, SD), torch.randn(1, 1, 1, 1), steps=0)
+
+
+def test_save_grid_writes_rows_of_images(tmp_path: Path):
+    path = tmp_path / "grids" / "s.png"  # grids/ doesn't exist yet
+    save_grid(torch.rand(10, 1, 28, 28) * 2 - 1, path, nrow=4)
+    # 10 images at 4 per row is 3 rows; 2 px padding around every image
+    with Image.open(path) as img:
+        assert img.size == (4 * 30 + 2, 3 * 30 + 2)
+
+
+def test_save_grid_maps_minus_one_to_black_and_one_to_white(tmp_path: Path):
+    path = tmp_path / "s.png"
+    images = torch.stack([torch.full((1, 4, 4), -1.0), torch.full((1, 4, 4), 1.0)])
+    save_grid(images, path, nrow=2)
+    with Image.open(path) as img:
+        gray = img.convert("L")
+        # first image's top-left pixel sits at (2, 2), past the padding
+        assert gray.getpixel((2, 2)) == 0
+        assert gray.getpixel((2 + 6, 2)) == 255
