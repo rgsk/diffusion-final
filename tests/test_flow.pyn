@@ -1,0 +1,93 @@
+# the straight path: exact endpoints, per-image t, constant velocity, and the
+# batch the training loop gets
+import pytest
+import torch
+from torch import Tensor
+from torch.func import jvp
+
+from flow import flow_batch, interpolate, sample_t, velocity
+
+
+@pytest.fixture
+def x0() -> Tensor:
+    return torch.randn(8, 1, 28, 28)
+
+
+@pytest.fixture
+def noise() -> Tensor:
+    return torch.randn(8, 1, 28, 28)
+
+
+def test_endpoints_are_exact(x0: Tensor, noise: Tensor):
+    # equal, not close: t = 0 is the data itself and t = 1 the noise itself
+    assert torch.equal(interpolate(x0, noise, torch.zeros(8)), x0)
+    assert torch.equal(interpolate(x0, noise, torch.ones(8)), noise)
+
+
+def test_each_image_gets_its_own_t(x0: Tensor, noise: Tensor):
+    t = torch.linspace(0, 1, 8)  # [8], a different t per image
+    x_t = interpolate(x0, noise, t)  # [8, 1, 28, 28]
+    for b in range(8):
+        alone = (1 - t[b]) * x0[b] + t[b] * noise[b]  # [1, 28, 28]
+        assert torch.allclose(x_t[b], alone)
+
+
+def test_velocity_is_the_derivative(x0: Tensor, noise: Tensor):
+    # d x_t / dt by autograd, at several t, against noise - x0
+    def path(t: Tensor) -> Tensor:
+        return interpolate(x0, noise, t)
+
+    t = torch.rand(8)
+    # forward-mode: the change in x_t per unit change in every t at once
+    dx_dt: Tensor = jvp(path, (t,), (torch.ones(8),))[1]  # [8, 1, 28, 28]
+    assert torch.allclose(dx_dt, velocity(x0, noise))
+
+
+def test_path_is_straight(x0: Tensor, noise: Tensor):
+    # moving from t = a to t = b covers (b - a) of the velocity, wherever a is,
+    # so every point on the line has the same target
+    v = velocity(x0, noise)
+    for a, b in [(0.0, 0.25), (0.25, 0.9), (0.6, 1.0)]:
+        x_a = interpolate(x0, noise, torch.full((8,), a))
+        x_b = interpolate(x0, noise, torch.full((8,), b))
+        assert torch.allclose(x_b - x_a, (b - a) * v, atol=1e-6)
+
+
+def test_sample_t_is_uniform_on_unit_interval():
+    t = sample_t(100_000)  # [100000]
+    assert t.shape == (100_000,)
+    assert t.min() >= 0 and t.max() < 1
+    # uniform: mean 1/2, std 1/sqrt(12) = 0.289; each off by ~1e-3 at this n
+    assert abs(t.mean() - 0.5) < 0.01
+    assert abs(t.std() - 0.289) < 0.01
+
+
+def test_std_dips_mid_path():
+    # unit-variance data and noise: std(x_t) = sqrt((1 - t)^2 + t^2), which is 1 at
+    # both ends and sqrt(1/2) = 0.707 at t = 1/2
+    x0 = torch.randn(100_000, 1, 1, 1)
+    noise = torch.randn_like(x0)
+    for t, want in [(0.0, 1.0), (0.5, 0.707), (1.0, 1.0)]:
+        x_t = interpolate(x0, noise, torch.full((100_000,), t))
+        assert abs(x_t.std() - want) < 0.01
+
+
+def test_flow_batch_shapes(x0: Tensor):
+    (x_t=, t=, target=) = flow_batch(x0)
+    assert x_t.shape == target.shape == x0.shape
+    assert t.shape == (8,)
+
+
+def test_flow_batch_is_one_path(x0: Tensor):
+    # x_t is t of the way along target from x0, so stepping back t * target from
+    # x_t lands on x0; a mismatched t, noise or sign would miss
+    (x_t=, t=, target=) = flow_batch(x0)
+    back = x_t - t.view(8, 1, 1, 1) * target  # [8, 1, 28, 28]
+    assert torch.allclose(back, x0, atol=1e-5)
+
+
+def test_flow_batch_draws_fresh_noise(x0: Tensor):
+    a = flow_batch(x0)
+    b = flow_batch(x0)
+    assert not torch.equal(a.target, b.target)
+    assert not torch.equal(a.t, b.t)

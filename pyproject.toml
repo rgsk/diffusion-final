@@ -45,6 +45,8 @@ src = ["src"]
 testpaths = ["tests"]
 addopts = ["--strict-markers"]
 markers = ["slow: seconds, not milliseconds -- skip with -m 'not slow'"]
+# torch's own torch.func calls its deprecated torch.jit.script on import; not ours to fix
+filterwarnings = ["ignore:`torch.jit.script` is deprecated:DeprecationWarning"]
 
 [tool.basedpyright]
 typeCheckingMode = "standard"
