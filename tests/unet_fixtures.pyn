@@ -1,8 +1,10 @@
-# the tiny UNet every test file shares; conftest.py re-exports these
+# the tiny UNet and dataset every test file shares; conftest.py re-exports these
 import pytest
 import torch
 
+from data import DataSplit, Digits
 from model import UNet, UNetConfig
+from train import TrainConfig
 
 
 @pytest.fixture
@@ -25,3 +27,30 @@ def awake(cfg: UNetConfig) -> UNet:
         for p in m.parameters():
             p.add_(0.1 * torch.randn_like(p))
     return m
+
+
+@pytest.fixture
+def data() -> DataSplit:
+    # 4 fixed random images, repeated: 64 train, 32 val. Val holds the same 4
+    # images, so a model that learns train lowers val too
+    patterns = torch.rand(4, 1, 28, 28) * 2 - 1  # [4, 1, 28, 28] in [-1, 1]
+    labels = torch.arange(4)  # [4], which pattern
+
+    def repeat(n: int) -> Digits:
+        return (images=patterns.repeat(n, 1, 1, 1), labels=labels.repeat(n))
+
+    return (train=repeat(16), val=repeat(8))
+
+
+@pytest.fixture
+def train_cfg() -> TrainConfig:
+    # a short run on data's 4 repeated images, about a second on CPU
+    return (
+        batch_size=16, max_steps=60,
+        max_lr=1e-2, min_lr=1e-3,
+        weight_decay=0.1,
+        grad_clip=1.0,
+        warmup_steps=5,
+        eval_interval=20,
+        eval_iters=5,
+    )

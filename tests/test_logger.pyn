@@ -1,0 +1,138 @@
+# a run's log: the .jsonl and .log copies, wandb offline, and train's calls to it
+import json
+import math
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+import wandb
+
+from data import DataSplit
+from logger import EvalRow, Run
+from model import UNet
+from train import TrainConfig, train
+
+
+def read_lines(run: Run) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in run.path.read_text().splitlines()]
+
+
+def test_offline_is_a_real_wandb_run(tmp_path: Path):
+    with Run("test", {"lr": 1e-3}, online=False, log_dir=tmp_path) as run:
+        assert run.wandb_run.offline
+        assert run.wandb_run.config["lr"] == 1e-3
+    # the run folder `wandb sync` uploads from
+    assert list((tmp_path / "wandb").glob("offline-run-*"))
+
+
+def test_jsonl_holds_config_rows_summary_then_end(tmp_path: Path):
+    row: EvalRow = (step=10, lr=1e-3, train_loss=2.0, val_loss=2.5, grad_norm=0.8)
+    with Run("test", {"lr": 1e-3}, online=False, log_dir=tmp_path) as run:
+        run.log(row, elapsed_s=4.0)
+        run.summary(best_val_loss=2.5)
+    assert run.path.name.startswith("test_")  # test_<YYYY-mm-dd_HH-MM-SS>.jsonl
+    config, log, summary, end = read_lines(run)
+    assert config == {"event": "config", "lr": 1e-3}
+    log.pop("memory/gpu_peak_gb", None)  # logged only on a GPU
+    assert log == {
+        "event": "log", "step": 10,
+        "loss/train": 2.0,
+        "loss/val": 2.5,
+        "lr": 1e-3,
+        "grad/max_norm": 0.8,
+        "time/elapsed_s": 4.0,
+    }
+    assert summary == {"event": "summary", "best_val_loss": 2.5}
+    assert end == {
+        "event": "end",
+        "status": "finished",
+        "error": None,
+        "traceback": None,
+    }
+
+
+def test_nan_and_inf_are_written_as_null(tmp_path: Path):
+    # Python's json would write NaN and Infinity, which aren't JSON, so jq rejects them
+    with Run("test", {}, online=False, log_dir=tmp_path) as run:
+        run.summary(diverged=math.nan, best=math.inf)
+    _, summary, _ = read_lines(run)
+    assert summary == {"event": "summary", "diverged": None, "best": None}
+
+
+def test_exiting_the_block_finishes_the_run(tmp_path: Path):
+    with Run("test", {}, online=False, log_dir=tmp_path):
+        assert wandb.run is not None
+    assert wandb.run is None
+
+
+def test_train_logs_every_eval_and_a_summary(
+    model: UNet, data: DataSplit, train_cfg: TrainConfig, tmp_path: Path
+):
+    with Run("test", dict(train_cfg), online=False, log_dir=tmp_path) as run:
+        history = train(model, data, train_cfg, run=)
+    _, *logs, summary, _ = read_lines(run)
+    # one line per history row, same step and val loss
+    assert [line["step"] for line in logs] == [0, 20, 40, 60]
+    assert [line["loss/val"] for line in logs] == [h.val_loss for h in history]
+    # no step before the first eval, so its grad norm is nan, written as null
+    is_null = [line["grad/max_norm"] is None for line in logs]
+    assert is_null == [True, False, False, False]
+    best = min(history, key=lambda h: h.val_loss)
+    assert summary["best_val_loss"] == best.val_loss
+    assert summary["best_step"] == best.step
+
+
+def test_log_file_holds_what_the_terminal_showed(tmp_path: Path):
+    terminal = sys.stdout
+    with Run("test", {"lr": 1e-3}, online=False, log_dir=tmp_path) as run:
+        print("step 0  val 4.2")
+    assert sys.stdout is terminal  # restored by finish()
+    # the run's name and config come first, then everything printed in the block
+    assert run.log_path.read_text().splitlines() == [
+        run.name,
+        "lr=0.001",
+        "step 0  val 4.2",
+        "run finished",
+    ]
+
+
+def test_an_error_ends_the_log_with_its_traceback(tmp_path: Path):
+    with (
+        pytest.raises(ValueError),
+        Run("test", {}, online=False, log_dir=tmp_path) as run,
+    ):
+        raise ValueError("loss is nan")
+    *_, last_traceback_line, status = run.log_path.read_text().splitlines()
+    assert last_traceback_line == "ValueError: loss is nan"
+    assert status == "run failed"
+    # the .jsonl keeps the error line, and the whole traceback the .log shows
+    *_, end = read_lines(run)
+    traceback_text: str = end.pop("traceback")
+    assert end == {
+        "event": "end",
+        "status": "failed",
+        "error": "ValueError: loss is nan",
+    }
+    assert traceback_text.startswith("Traceback (most recent call last):")
+    assert traceback_text in run.log_path.read_text()
+
+
+def test_ctrl_c_ends_the_log_with_one_line_not_a_traceback(tmp_path: Path):
+    with (
+        pytest.raises(KeyboardInterrupt),
+        Run("test", {}, online=False, log_dir=tmp_path) as run,
+    ):
+        raise KeyboardInterrupt
+    *_, error_line, status = run.log_path.read_text().splitlines()
+    assert error_line == "KeyboardInterrupt"
+    assert status == "run interrupted"
+    # no traceback, because where Ctrl+C landed says nothing
+    assert "Traceback" not in run.log_path.read_text()
+    *_, end = read_lines(run)
+    assert end == {
+        "event": "end",
+        "status": "interrupted",
+        "error": "KeyboardInterrupt",
+        "traceback": None,
+    }

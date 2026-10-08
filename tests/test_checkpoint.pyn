@@ -1,0 +1,81 @@
+# saving a UNet and rebuilding it from the file alone, and train's save_best
+from pathlib import Path
+from typing import Any
+
+import pytest
+import torch
+
+from checkpoint import load_checkpoint, save_checkpoint
+from data import DataSplit
+from model import UNet, UNetConfig
+from train import TrainConfig, train
+
+
+@pytest.fixture
+def ckpt_path(tmp_path: Path) -> Path:
+    return tmp_path / "ckpts" / "run.pt"  # ckpts/ doesn't exist yet
+
+
+def test_loaded_model_computes_the_same_velocity(
+    awake: UNet, cfg: UNetConfig, ckpt_path: Path
+):
+    save_checkpoint(ckpt_path, awake, cfg, step=0, val_loss=0.0)
+    (model=loaded) = load_checkpoint(ckpt_path)
+    x, t = torch.randn(2, 1, 28, 28), torch.rand(2)
+    assert torch.equal(loaded(x, t), awake(x, t))
+
+
+def test_config_and_metadata_come_back(model: UNet, cfg: UNetConfig, ckpt_path: Path):
+    save_checkpoint(ckpt_path, model, cfg, step=42, val_loss=1.5)
+    (unet_cfg=, step=, val_loss=) = load_checkpoint(ckpt_path)
+    # channels comes back a tuple, as saved, so the records are equal
+    assert unet_cfg == cfg
+    assert step == 42
+    assert val_loss == 1.5
+
+
+def test_saving_again_overwrites_and_leaves_no_temp_file(
+    model: UNet, cfg: UNetConfig, ckpt_path: Path
+):
+    save_checkpoint(ckpt_path, model, cfg, step=1, val_loss=2.0)
+    save_checkpoint(ckpt_path, model, cfg, step=2, val_loss=1.0)
+    (step=) = load_checkpoint(ckpt_path)
+    assert step == 2
+    # save writes run.tmp, then renames it to run.pt, so only run.pt should remain
+    assert [p.name for p in ckpt_path.parent.iterdir()] == ["run.pt"]
+
+
+def test_weights_from_another_config_are_rejected(
+    model: UNet, cfg: UNetConfig, ckpt_path: Path
+):
+    # the saved config is what rebuilds the model; a wrong one fails on load
+    wider = cfg._replace(channels=(16, 32, 32))
+    save_checkpoint(ckpt_path, model, wider, step=0, val_loss=0.0)
+    with pytest.raises(RuntimeError, match="size mismatch"):
+        load_checkpoint(ckpt_path)
+
+
+def test_a_checkpoint_missing_a_config_field_is_rejected(
+    model: UNet, cfg: UNetConfig, ckpt_path: Path
+):
+    # as if saved before UNetConfig had groups
+    save_checkpoint(ckpt_path, model, cfg, step=0, val_loss=0.0)
+    ckpt: dict[str, Any] = torch.load(ckpt_path, weights_only=True)
+    del ckpt["unet_cfg"]["groups"]
+    torch.save(ckpt, ckpt_path)
+    with pytest.raises(TypeError, match="missing field 'groups'"):
+        load_checkpoint(ckpt_path)
+
+
+def test_save_best_keeps_the_lowest_val_loss(
+    model: UNet,
+    cfg: UNetConfig,
+    data: DataSplit,
+    train_cfg: TrainConfig,
+    ckpt_path: Path,
+):
+    history = train(model, data, train_cfg, save_best=(path=ckpt_path, unet_cfg=cfg))
+    best = min(history, key=lambda h: h.val_loss)
+    (step=, val_loss=) = load_checkpoint(ckpt_path)
+    assert step == best.step
+    assert val_loss == best.val_loss

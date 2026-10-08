@@ -1,0 +1,269 @@
+# losses, evaluation and the training loop, on a tiny UNet and 4 repeated images
+import math
+from itertools import pairwise
+
+import pytest
+import torch
+import torch.nn.functional as F
+from torch import Tensor, nn
+
+from data import DataSplit, get_batch
+from flow import flow_batch
+from model import UNet
+from train import (
+    TrainConfig,
+    autocast,
+    batch_loss,
+    full_val_loss,
+    lr_at,
+    param_groups,
+    sampled_train_loss,
+    train,
+    train_step,
+)
+
+
+def test_fresh_model_loss_is_predicting_zero(model: UNet, data: DataSplit):
+    # zero-init output, so the loss is exactly the target's mean square
+    batch = flow_batch(data.train.images[:16])
+    expected = batch.target.pow(2).mean()  # []
+    assert batch_loss(model, batch).item() == pytest.approx(expected.item())
+
+
+def test_batch_loss_is_mse_of_the_velocity(awake: UNet, data: DataSplit):
+    batch = flow_batch(data.train.images[:16])
+    v = awake(batch.x_t, batch.t)  # [16, 1, 28, 28]
+    per_image = [F.mse_loss(v[b], batch.target[b]) for b in range(16)]  # 16 x []
+    expected = torch.stack(per_image).mean()  # equal sizes, so the mean of means
+    assert batch_loss(awake, batch).item() == pytest.approx(expected.item(), rel=1e-5)
+
+
+def test_autocast_is_off_on_cpu(awake: UNet, data: DataSplit):
+    batch = flow_batch(data.train.images[:2])
+    with autocast(batch.x_t.device):
+        assert awake(batch.x_t, batch.t).dtype == torch.float32
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="bf16 autocast is GPU-only")
+def test_batch_loss_runs_in_bf16_on_gpu(awake: UNet, data: DataSplit):
+    awake.to("cuda")
+    batch = flow_batch(data.train.images[:16].to("cuda"))
+    # record the dtype the velocity comes out in, inside batch_loss
+    out_dtypes: list[torch.dtype] = []
+    awake.conv_out.register_forward_hook(
+        lambda _module, _inputs, out: out_dtypes.append(out.dtype)
+    )
+    loss = batch_loss(awake, batch)
+    assert out_dtypes == [torch.bfloat16]
+    assert loss.dtype == torch.float32  # compared to the target in fp32
+    # same forward without autocast, so fp32 throughout
+    fp32_loss = F.mse_loss(awake(batch.x_t, batch.t), batch.target)
+    # bf16 keeps 8 mantissa bits, so only ~2-3 significant digits
+    assert loss.item() == pytest.approx(fp32_loss.item(), rel=1e-2)
+
+
+def test_full_val_loss_is_the_same_every_eval(awake: UNet, data: DataSplit):
+    # fixed noise and t, so an unchanged model scores exactly the same
+    first = full_val_loss(awake, data.val.images, batch_size=8)
+    assert full_val_loss(awake, data.val.images, batch_size=8) == first
+
+
+def test_full_val_loss_is_batch_loss_on_the_seeded_batch(awake: UNet, data: DataSplit):
+    images = data.val.images  # [32, 1, 28, 28]
+    batch = flow_batch(images, generator=torch.Generator().manual_seed(0))
+    all_at_once = batch_loss(awake, batch).item()
+    assert full_val_loss(awake, images, batch_size=1000, seed=0) == pytest.approx(
+        all_at_once, rel=1e-5
+    )
+
+
+@pytest.mark.parametrize("batch_size", [1, 5, 12, 32])
+def test_full_val_loss_does_not_depend_on_batch_size(
+    awake: UNet, data: DataSplit, batch_size: int
+):
+    # noise and t are drawn for the whole split before batching, so each image
+    # keeps its own whatever the batches are
+    images = data.val.images
+    one_batch = full_val_loss(awake, images, batch_size=1000)
+    assert full_val_loss(awake, images, batch_size=) == pytest.approx(
+        one_batch, rel=1e-5
+    )
+
+
+def test_full_val_loss_depends_on_seed(awake: UNet, data: DataSplit):
+    images = data.val.images
+    a = full_val_loss(awake, images, batch_size=8, seed=0)
+    assert full_val_loss(awake, images, batch_size=8, seed=1) != a
+
+
+def test_full_val_loss_leaves_the_global_rng_alone(awake: UNet, data: DataSplit):
+    # its own generator, so evaluating doesn't change which batches training draws
+    torch.manual_seed(5)
+    expected = torch.rand(3)
+    torch.manual_seed(5)
+    full_val_loss(awake, data.val.images, batch_size=8)
+    assert torch.equal(torch.rand(3), expected)
+
+
+def test_sampled_train_loss_is_mean_of_random_batches(awake: UNet, data: DataSplit):
+    # same seed twice, so these are the exact batches and noise it drew
+    torch.manual_seed(0)
+    sampled = sampled_train_loss(awake, data.train, batch_size=4, iters=5)
+    torch.manual_seed(0)
+    losses = []  # 5 x []
+    for _ in range(5):
+        x0, _ = get_batch(data.train, batch_size=4)  # [4, 1, 28, 28]
+        losses.append(batch_loss(awake, flow_batch(x0)))
+    expected = torch.stack(losses).mean()  # []
+    assert sampled == pytest.approx(expected.item(), rel=1e-5)
+
+
+@pytest.mark.parametrize("training", [True, False])
+def test_evaluation_restores_mode(model: UNet, data: DataSplit, training: bool):
+    model.train(training)
+    full_val_loss(model, data.val.images, batch_size=8)
+    assert model.training is training
+    sampled_train_loss(model, data.train, batch_size=4, iters=2)
+    assert model.training is training
+
+
+# lr_at's settings; spread into it as **lr_cfg. Steps 0 .. 99 run, with warmup
+# on 0 .. 4 and decay on 5 .. 99
+lr_cfg = (warmup_steps=5, max_steps=100, max_lr=1e-2, min_lr=1e-3)
+
+
+def test_warmup_starts_at_one_step_and_reaches_max_lr():
+    (warmup_steps=, max_lr=) = lr_cfg
+    # step 0 already takes one warmup step, so the lr is 1e-2 / 5
+    assert lr_at(0, **lr_cfg) == max_lr / warmup_steps
+    assert lr_at(0, **lr_cfg) == 2.0e-3
+    assert lr_at(warmup_steps - 1, **lr_cfg) == pytest.approx(max_lr)
+
+
+def test_decay_starts_at_max_lr_and_ends_at_min_lr():
+    (warmup_steps=, max_steps=, max_lr=, min_lr=) = lr_cfg
+    # no jump where warmup ends
+    assert lr_at(warmup_steps, **lr_cfg) == pytest.approx(max_lr)
+    last_step = max_steps - 1
+    # the last step that runs. cos(pi) is exactly -1, so exactly min_lr
+    assert lr_at(last_step, **lr_cfg) == min_lr
+    assert lr_at(max_steps, **lr_cfg) == min_lr  # past the run, it stays there
+
+
+def test_lr_rises_through_warmup_then_only_falls():
+    (warmup_steps=, max_steps=) = lr_cfg
+    warmup = [lr_at(s, **lr_cfg) for s in range(warmup_steps)]
+    decay = [lr_at(s, **lr_cfg) for s in range(warmup_steps, max_steps)]
+    assert all(a < b for a, b in pairwise(warmup))
+    assert all(a > b for a, b in pairwise(decay))
+
+
+def test_cosine_is_halfway_at_the_midpoint_of_decay():
+    (warmup_steps=, max_steps=, max_lr=, min_lr=) = lr_cfg
+    midpoint = (warmup_steps + max_steps - 1) // 2  # 52, halfway through 5 .. 99
+    assert lr_at(midpoint, **lr_cfg) == pytest.approx((max_lr + min_lr) / 2)
+
+
+def test_warmup_must_leave_steps_to_decay():
+    # 11 steps run (0 .. 10) and warmup takes 0 .. 9, so step 10 alone can't decay
+    no_decay = lr_cfg._replace(warmup_steps=10, max_steps=11)
+    with pytest.raises(
+        AssertionError, match="warmup_steps 10 leaves no decay before step 10"
+    ):
+        lr_at(0, **no_decay)
+
+
+def test_weights_decay_and_biases_and_norms_dont(model: UNet):
+    decay, no_decay = param_groups(model, weight_decay=0.1)
+    assert (decay["weight_decay"], no_decay["weight_decay"]) == (0.1, 0.0)
+    names = {id(p): n for n, p in model.named_parameters()}
+    decay_params: list[nn.Parameter] = decay["params"]
+    no_decay_params: list[nn.Parameter] = no_decay["params"]
+    decayed = [names[id(p)] for p in decay_params]
+    kept = [names[id(p)] for p in no_decay_params]
+    # conv and linear weights only
+    assert all(n.endswith(".weight") and "norm" not in n for n in decayed)
+    assert "conv_in.weight" in decayed and "time_mlp.0.weight" in decayed
+    # every bias, and GroupNorm's scale (weight) and shift (bias)
+    assert all(n.endswith(".bias") or "norm" in n for n in kept)
+    assert "norm_out.weight" in kept and "conv_in.bias" in kept
+    # each parameter in exactly one group
+    assert sorted(decayed + kept) == sorted(names.values())
+
+
+def grad_norm_now(model: UNet) -> float:
+    # every gradient as one long vector, as clip_grad_norm_ sees them
+    norms: list[Tensor] = [
+        p.grad.norm() for p in model.parameters() if p.grad is not None
+    ]
+    return torch.stack(norms).norm().item()
+
+
+def test_train_step_scales_a_long_gradient_down_to_grad_clip(
+    awake: UNet, data: DataSplit
+):
+    opt = torch.optim.AdamW(awake.parameters())
+    grad_clip = 0.01  # far below an untrained model's grad norm
+    grad_norm = train_step(
+        awake, opt, flow_batch(data.train.images[:16]), grad_clip=
+    )
+    assert grad_norm.item() > grad_clip
+    # .grad still holds what opt.step() used, clipped to norm grad_clip
+    assert grad_norm_now(awake) == pytest.approx(grad_clip, rel=1e-4)
+
+
+def test_train_step_leaves_a_short_gradient_alone(awake: UNet, data: DataSplit):
+    opt = torch.optim.AdamW(awake.parameters())
+    grad_clip = 1e6  # far above any grad norm here
+    grad_norm = train_step(
+        awake, opt, flow_batch(data.train.images[:16]), grad_clip=
+    )
+    assert grad_norm_now(awake) == pytest.approx(grad_norm.item(), rel=1e-5)
+
+
+def test_history_has_one_entry_per_eval(
+    model: UNet, data: DataSplit, train_cfg: TrainConfig
+):
+    history = train(model, data, train_cfg)
+    (max_steps=, eval_interval=) = train_cfg
+    # every eval_interval steps inside the loop, then once more after the last step
+    eval_steps = [*range(0, max_steps, eval_interval), max_steps]
+    assert [h.step for h in history] == eval_steps
+    assert eval_steps == [0, 20, 40, 60]
+
+
+def test_grad_norm_is_nan_before_the_first_step_then_positive(
+    model: UNet, data: DataSplit, train_cfg: TrainConfig
+):
+    history = train(model, data, train_cfg)
+    first, *rest = history
+    assert math.isnan(first.grad_norm)  # nan at step 0 because no step has run yet
+    assert all(h.grad_norm > 0 for h in rest)
+
+
+def test_training_lowers_val_loss(model: UNet, data: DataSplit, train_cfg: TrainConfig):
+    history = train(model, data, train_cfg)
+    first, last = history[0], history[-1]
+    # starts at predicting 0 (~1.33). It can't reach 0: near t = 1, x_t is nearly
+    # pure noise and barely says which of the 4 images it came from, so the best
+    # guess there is their average. 60 steps get it to ~0.87
+    assert last.val_loss < 0.75 * first.val_loss
+
+
+def test_train_steps_with_the_scheduled_lr(
+    model: UNet, data: DataSplit, train_cfg: TrainConfig
+):
+    # each eval records the lr the optimizer used for its latest step
+    history = train(model, data, train_cfg)
+    (warmup_steps=, max_steps=, max_lr=, min_lr=, eval_interval=) = (
+        train_cfg
+    )
+    # an eval inside the loop follows setting its step's lr; the final eval, after
+    # the loop, still holds the last step's (max_steps - 1)
+    lr_steps = [*range(0, max_steps, eval_interval), max_steps - 1]
+    expected = [
+        lr_at(s, warmup_steps=, max_steps=, max_lr=, min_lr=)
+        for s in lr_steps
+    ]
+    assert [h.lr for h in history] == pytest.approx(expected)
+    assert lr_steps == [0, 20, 40, 59]

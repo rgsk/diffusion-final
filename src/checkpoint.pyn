@@ -1,0 +1,41 @@
+# a checkpoint file: a UNet's weights plus the config that rebuilds it, so loading
+# needs nothing but the file
+from pathlib import Path
+from typing import Any
+
+import torch
+from byname import record
+
+from model import UNet, UNetConfig
+
+
+def save_checkpoint(
+    path: Path, model: UNet, unet_cfg: UNetConfig, *, step: int, val_loss: float
+) -> None:
+    # the config goes in as a plain dict, because weights_only loading refuses
+    # arbitrary classes, records included
+    ckpt = {
+        "model": model.state_dict(),
+        "unet_cfg": unet_cfg._asdict(),
+        "step": step,
+        "val_loss": val_loss,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # write aside, then rename, so a crash mid-write leaves the old file intact
+    tmp = path.with_suffix(".tmp")
+    torch.save(ckpt, tmp)
+    tmp.replace(path)
+
+
+def load_checkpoint(
+    path: Path, *, device: str | torch.device = "cpu"
+) -> (model: UNet, unet_cfg: UNetConfig, step: int, val_loss: float):
+    # weights_only: unpickle tensors and plain containers, never arbitrary code
+    ckpt: dict[str, Any] = torch.load(path, map_location=device, weights_only=True)
+    # names and types checked at runtime, so a file saved before a UNetConfig
+    # field existed raises here, naming the missing field
+    unet_cfg = record(UNetConfig, ckpt["unet_cfg"])
+    # rebuild the architecture from the file, then fill in its weights
+    model = UNet(unet_cfg).to(device)
+    model.load_state_dict(ckpt["model"])  # strict: a missing or extra key raises
+    return (model=, unet_cfg=, step=ckpt["step"], val_loss=ckpt["val_loss"])

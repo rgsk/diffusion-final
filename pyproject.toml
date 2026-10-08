@@ -8,6 +8,7 @@ dependencies = [
     "torch==2.13.0",
     # MNIST download and parsing only; no transforms or DataLoader
     "torchvision>=0.28.0",
+    "wandb>=0.30.0",
 ]
 
 [build-system]

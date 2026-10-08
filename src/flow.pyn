@@ -10,9 +10,14 @@ from torch import Tensor
 type FlowBatch = (x_t: Tensor, t: Tensor, target: Tensor)
 
 
-def sample_t(n: int, *, device: str | torch.device = "cpu") -> Tensor:
+def sample_t(
+    n: int,
+    *,
+    device: str | torch.device = "cpu",
+    generator: torch.Generator | None = None,
+) -> Tensor:
     # out: [n], uniform on [0, 1), continuous; every point on the path is trained
-    return torch.rand(n, device=device)
+    return torch.rand(n, device=, generator=)
 
 
 def interpolate(x0: Tensor, noise: Tensor, t: Tensor) -> Tensor:
@@ -28,12 +33,14 @@ def velocity(x0: Tensor, noise: Tensor) -> Tensor:
     return noise - x0
 
 
-def flow_batch(x0: Tensor) -> FlowBatch:
+def flow_batch(x0: Tensor, *, generator: torch.Generator | None = None) -> FlowBatch:
     # x0: [B, C, H, W], clean images
     # out: x_t [B, C, H, W], t [B], target [B, C, H, W]
-    # fresh noise and a fresh t per image, so each step sees new points on new paths
-    noise = torch.randn_like(x0)  # [B, C, H, W]
-    t = sample_t(len(x0), device=x0.device)  # [B]
+    # fresh noise and a fresh t per image, so each step sees new points on new paths.
+    # A seeded generator (on x0's device) draws the same ones every call instead,
+    # which is how val loss stays comparable from one eval to the next
+    noise = torch.randn(x0.shape, device=x0.device, generator=)  # [B, C, H, W]
+    t = sample_t(len(x0), device=x0.device, generator=)  # [B]
     x_t = interpolate(x0, noise, t)  # [B, C, H, W]
     return (x_t=, t=, target=velocity(x0, noise))
 

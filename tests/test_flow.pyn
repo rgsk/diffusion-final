@@ -91,3 +91,12 @@ def test_flow_batch_draws_fresh_noise(x0: Tensor):
     b = flow_batch(x0)
     assert not torch.equal(a.target, b.target)
     assert not torch.equal(a.t, b.t)
+
+
+def test_flow_batch_with_a_seeded_generator_repeats(x0: Tensor):
+    # same seed, same noise and t, so val loss can be measured on the same points
+    a = flow_batch(x0, generator=torch.Generator().manual_seed(7))
+    b = flow_batch(x0, generator=torch.Generator().manual_seed(7))
+    assert torch.equal(a.t, b.t)
+    assert torch.equal(a.target, b.target)
+    assert torch.equal(a.x_t, b.x_t)

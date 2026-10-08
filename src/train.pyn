@@ -1,0 +1,240 @@
+# losses, evaluation and the training loop
+import math
+import time
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+from torch import Tensor
+
+from checkpoint import save_checkpoint
+from data import DataSplit, Digits, get_batch
+from flow import FlowBatch, flow_batch
+from logger import EvalRow, Run
+from model import UNet, UNetConfig
+
+type TrainConfig = (
+    batch_size: int, max_steps: int,
+    max_lr: float, min_lr: float,
+    weight_decay: float,
+    grad_clip: float,
+    warmup_steps: int,
+    eval_interval: int,
+    eval_iters: int,
+)
+
+# val's noise and t come from this seed at every eval, so two evals differ only
+# because the model did
+VAL_SEED = 0
+
+
+def lr_at(
+    step: int, *, warmup_steps: int, max_steps: int, max_lr: float, min_lr: float
+) -> float:
+    # linear warmup to max_lr, then cosine decay to min_lr on the last step train
+    # runs (max_steps - 1), so min_lr is the lr the run ends with
+    last_step = max_steps - 1
+    assert warmup_steps < last_step, (
+        f"warmup_steps {warmup_steps} leaves no decay before step {last_step}"
+    )
+    if step < warmup_steps:
+        # step + 1 so that step 0 is already a warmup step and no step has lr 0
+        return max_lr * (step + 1) / warmup_steps
+    if step >= max_steps:  # past the run
+        return min_lr
+    progress = (step - warmup_steps) / (last_step - warmup_steps)  # 0 -> 1
+    cosine = 0.5 * (1 + math.cos(math.pi * progress))  # 1 -> 0
+    return min_lr + cosine * (max_lr - min_lr)
+
+
+def param_groups(model: UNet, *, weight_decay: float) -> list[dict[str, Any]]:
+    # AdamW's groups, split as in GPT-2 and nanoGPT. The matrices (linear and
+    # conv weights) decay; the vectors (biases, the norms' scales and shifts)
+    # don't
+    matrices = [p for p in model.parameters() if p.dim() >= 2]
+    vectors = [p for p in model.parameters() if p.dim() < 2]
+    return [
+        {"params": matrices, "weight_decay": weight_decay},
+        {"params": vectors, "weight_decay": 0.0},
+    ]
+
+
+def autocast(device: torch.device):
+    # bf16 for the convs and matmuls on GPU; autocast keeps the reductions,
+    # the norms and the loss in fp32, and the stored weights stay fp32.
+    # bf16 has fp32's exponent range, so gradients don't underflow, hence no
+    # GradScaler. Off on CPU, where bf16 is slower
+    return torch.autocast(
+        device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"
+    )
+
+
+def batch_loss(
+    model: UNet, (x_t=, t=, target=): FlowBatch
+) -> Tensor:
+    # x_t: [B, C, H, W], t: [B], target: [B, C, H, W]
+    # out: []
+    # mean squared error of the predicted velocity, over every pixel of every image
+    with autocast(x_t.device):
+        v = model(x_t, t)  # [B, C, H, W]
+    # in fp32, because a bf16 v would round the target it's compared to
+    return F.mse_loss(v.float(), target)
+
+
+def train_step(
+    model: UNet, opt: torch.optim.Optimizer, batch: FlowBatch, *, grad_clip: float
+) -> Tensor:
+    # out: [], the gradient norm before clipping
+    loss = batch_loss(model, batch)
+    opt.zero_grad()  # grads accumulate otherwise
+    loss.backward()
+    # treats every gradient as one long vector and scales it down to norm
+    # grad_clip when it's longer, so one bad batch can't throw the weights far;
+    # the direction is kept
+    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+    opt.step()
+    return grad_norm
+
+
+@torch.no_grad()
+def full_val_loss(
+    model: UNet, images: Tensor, *, batch_size: int, seed: int = VAL_SEED
+) -> float:
+    # images: [N, C, H, W], the val split's
+    # exact loss over every val image, each at one fixed (noise, t) drawn from
+    # seed, so the number moves only when the model does. Drawn for the whole
+    # split at once, so the batch size doesn't change which image gets which
+    was_training = model.training
+    model.eval()
+    device = model.device
+    (x_t=, t=, target=) = flow_batch(
+        images, generator=torch.Generator(images.device).manual_seed(seed)
+    )
+    # summed on the device, so no host sync per batch
+    total = torch.tensor(0.0, device=)
+    for i in range(0, len(images), batch_size):
+        batch: FlowBatch = (
+            x_t=x_t[i : i + batch_size].to(device),
+            t=t[i : i + batch_size].to(device),
+            target=target[i : i + batch_size].to(device),
+        )
+        # weight by image count so a smaller last batch doesn't skew the mean
+        total += batch_loss(model, batch) * len(batch.t)
+    model.train(was_training)  # restore the caller's mode
+    return (total / len(images)).item()
+
+
+@torch.no_grad()
+def sampled_train_loss(
+    model: UNet, train: Digits, *, batch_size: int, iters: int
+) -> float:
+    # the train split is too big for a full pass, so average a few random batches,
+    # each with fresh noise and t
+    was_training = model.training
+    model.eval()
+    losses: list[Tensor] = []
+    for _ in range(iters):
+        x0, _ = get_batch(train, batch_size=, device=model.device)  # [B, C, H, W]
+        losses.append(batch_loss(model, flow_batch(x0)))
+    model.train(was_training)
+    return torch.stack(losses).mean().item()  # one sync, not one per batch
+
+
+def train(
+    model: UNet,
+    (train=, val=): DataSplit,
+    (
+        batch_size=, max_steps=, max_lr=, min_lr=, weight_decay=, grad_clip=,
+        warmup_steps=, eval_interval=, eval_iters=,
+    ): TrainConfig,
+    *,
+    save_best: (path: Path, unet_cfg: UNetConfig) | None = None,
+    run: Run | None = None,
+):
+    # AdamW, evaluated every eval_interval steps and once at the end
+    groups = param_groups(model, weight_decay=)
+    opt = torch.optim.AdamW(groups, lr=max_lr)  # lr overwritten each step
+    history: list[EvalRow] = []
+    best_val_loss = math.inf
+    best_step = 0
+    # the largest pre-clip grad norm since the last eval, so a spike shows even
+    # when it falls between evals. Kept on the device, so no host sync per step
+    max_grad_norm = torch.tensor(0.0, device=model.device)
+    start = time.perf_counter()
+
+    def evaluate(step: int):
+        nonlocal best_val_loss, best_step, max_grad_norm
+        train_loss = sampled_train_loss(model, train, batch_size=, iters=eval_iters)
+        val_loss = full_val_loss(model, val.images, batch_size=)
+        lr: float = opt.param_groups[0]["lr"]  # the lr of the latest step
+        # nan at step 0 because no step has run yet
+        grad_norm = max_grad_norm.item() if step > 0 else math.nan
+        max_grad_norm = torch.tensor(0.0, device=model.device)
+        row: EvalRow = (
+            step=, lr=, train_loss=, val_loss=, grad_norm=
+        )
+        history.append(row)
+        is_best = val_loss < best_val_loss
+        # elapsed includes evaluation; .item() above already waited for the GPU
+        elapsed = time.perf_counter() - start
+        if run is not None:
+            run.log(row, elapsed_s=elapsed)
+        print(
+            f"step {step:>5}  lr {lr:.2e}  train {train_loss:.3f}  val {val_loss:.3f}"
+            + f"  grad {grad_norm:.2f}  {elapsed:6.1f}s"
+            + ("  *" if is_best else "")
+        )
+        if is_best:
+            best_val_loss = val_loss
+            best_step = step
+            # at every new best, not only at the end, because val can rise
+            # again before the last step
+            if save_best is not None:
+                (path=, unet_cfg=) = save_best
+                save_checkpoint(path, model, unet_cfg, step=, val_loss=)
+
+    model.train()
+    for step in range(max_steps):
+        lr = lr_at(step, warmup_steps=, max_steps=, max_lr=, min_lr=)
+        for group in opt.param_groups:
+            group["lr"] = lr
+        if step % eval_interval == 0:
+            evaluate(step)
+        # labels unused until the model is class-conditioned
+        x0, _ = get_batch(train, batch_size=, device=model.device)  # [B, C, H, W]
+        grad_norm = train_step(model, opt, flow_batch(x0), grad_clip=)
+        max_grad_norm = torch.maximum(max_grad_norm, grad_norm)
+    evaluate(max_steps)
+    if run is not None:
+        total_time_s = time.perf_counter() - start
+        run.summary(best_val_loss=, best_step=, total_time_s=)
+    return history
+
+
+if __name__ == "__main__":
+    from data import split
+
+    torch.manual_seed(1337)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.set_float32_matmul_precision("high")
+    data = split()
+
+    unet_cfg: UNetConfig = (
+        in_channels=1, channels=(32, 64, 64), time_dim=128, groups=8
+    )
+    train_cfg: TrainConfig = (
+        batch_size=128, max_steps=500,
+        max_lr=2e-3, min_lr=2e-4,
+        weight_decay=0.0,
+        grad_clip=1.0,
+        warmup_steps=50,
+        eval_interval=100,
+        eval_iters=10,
+    )
+    model = UNet(unet_cfg).to(device)
+    # the step-0 val loss is the predict-0 floor; a model that learned anything
+    # must get below 1.27, which is predicting each pixel's mean velocity
+    print(f"{device}  floors: predict 0 1.93, per-pixel mean 1.27")
+    history = train(model, data, train_cfg)
+    print(f"val {history[0].val_loss:.3f} -> {history[-1].val_loss:.3f}")
