@@ -13,7 +13,9 @@ import sys
 from pathlib import Path
 
 RULES = "reportAny=true, reportUnknownVariableType=true"
-HIT = re.compile(r':(\d+):(\d+) - error: Type of "(\w+)" is (Any|partially unknown|unknown)')
+HIT = re.compile(
+    r':(\d+):(\d+) - error: Type of "(\w+)" is (Any|partially unknown|unknown)'
+)
 Func = ast.FunctionDef | ast.AsyncFunctionDef
 SKIP = re.compile(r"#.*\bany:ok\b")
 
@@ -39,10 +41,15 @@ def declared(tree: ast.Module, line: int, name: str) -> bool:
             scope = node
     if isinstance(scope, Func):
         a = scope.args
-        if any(p.arg == name and p.annotation for p in [*a.posonlyargs, *a.args, *a.kwonlyargs]):
+        if any(
+            p.arg == name and p.annotation
+            for p in [*a.posonlyargs, *a.args, *a.kwonlyargs]
+        ):
             return True
     return any(
-        isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == name
+        isinstance(n, ast.AnnAssign)
+        and isinstance(n.target, ast.Name)
+        and n.target.id == name
         for n in ast.walk(scope)
     )
 
@@ -53,8 +60,14 @@ def main() -> int:
     tmp = path.with_name(f"_anycheck_{path.name}")
     _ = tmp.write_text(f"# pyright: {RULES}\n" + path.read_text())
     try:
-        cmd = ["byname", "tool", "basedpyright"] if path.suffix == ".pyn" else ["basedpyright"]
-        out = subprocess.run([*cmd, str(tmp)], capture_output=True, text=True, check=False).stdout
+        cmd = (
+            ["byname", "tool", "basedpyright"]
+            if path.suffix == ".pyn"
+            else ["basedpyright"]
+        )
+        out = subprocess.run(
+            [*cmd, str(tmp)], capture_output=True, text=True, check=False
+        ).stdout
     finally:
         tmp.unlink()
     tree = source_tree(path)
@@ -69,7 +82,10 @@ def main() -> int:
     }
     hits: set[tuple[int, int, str, str]] = set()
     for line_s, col_s, name, kind in HIT.findall(out):
-        line, col = int(line_s) - 1, int(col_s)  # -1: the rules comment shifted every line down
+        line, col = (
+            int(line_s) - 1,
+            int(col_s),
+        )  # -1: the rules comment shifted every line down
         if not lines[line - 1][col - 1 :].startswith(name):
             continue  # `logits.shape`, reported at `logits`: an attribute of an Any value, not a name
         if SKIP.search(lines[line - 1]):

@@ -72,7 +72,7 @@ def test_train_logs_every_eval_and_a_summary(
     model: UNet, data: DataSplit, train_cfg: TrainConfig, tmp_path: Path
 ):
     with Run("test", dict(train_cfg), online=False, log_dir=tmp_path) as run:
-        history = train(model, data, train_cfg, run=)
+        history = train(model, data=, train_cfg=, run=)
     _, *logs, summary, _ = read_lines(run)
     # one line per history row, same step and val loss
     assert [line["step"] for line in logs] == [0, 20, 40, 60]

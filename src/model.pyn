@@ -97,11 +97,9 @@ class Upsample(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(
-        self,
-        (in_channels=, channels=, time_dim=, groups=): UNetConfig,
-    ):
+    def __init__(self, cfg: UNetConfig):
         super().__init__()
+        (in_channels=, channels=, time_dim=, groups=) = cfg
         self.channels = channels
         self.time_mlp = nn.Sequential(
             nn.Linear(time_dim, time_dim), nn.SiLU(), nn.Linear(time_dim, time_dim)

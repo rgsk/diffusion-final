@@ -100,10 +100,11 @@ class Run:
 
     def log(
         self,
-        (step=, lr=, train_loss=, val_loss=, grad_norm=): EvalRow,
+        row: EvalRow,
         *,
         elapsed_s: float,
     ):
+        (step=, lr=, train_loss=, val_loss=, grad_norm=) = row
         # namespaced names, so wandb groups loss/*, grad/*, time/* and memory/* into
         # sections. Not system/*, because that section charts only the metrics
         # wandb collects itself

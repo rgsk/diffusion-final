@@ -224,7 +224,7 @@ def test_train_step_leaves_a_short_gradient_alone(awake: UNet, data: DataSplit):
 def test_history_has_one_entry_per_eval(
     model: UNet, data: DataSplit, train_cfg: TrainConfig
 ):
-    history = train(model, data, train_cfg)
+    history = train(model, data=, train_cfg=)
     (max_steps=, eval_interval=) = train_cfg
     # every eval_interval steps inside the loop, then once more after the last step
     eval_steps = [*range(0, max_steps, eval_interval), max_steps]
@@ -235,14 +235,14 @@ def test_history_has_one_entry_per_eval(
 def test_grad_norm_is_nan_before_the_first_step_then_positive(
     model: UNet, data: DataSplit, train_cfg: TrainConfig
 ):
-    history = train(model, data, train_cfg)
+    history = train(model, data=, train_cfg=)
     first, *rest = history
     assert math.isnan(first.grad_norm)  # nan at step 0 because no step has run yet
     assert all(h.grad_norm > 0 for h in rest)
 
 
 def test_training_lowers_val_loss(model: UNet, data: DataSplit, train_cfg: TrainConfig):
-    history = train(model, data, train_cfg)
+    history = train(model, data=, train_cfg=)
     first, last = history[0], history[-1]
     # starts at predicting 0 (~1.33). It can't reach 0: near t = 1, x_t is nearly
     # pure noise and barely says which of the 4 images it came from, so the best
@@ -254,7 +254,7 @@ def test_train_steps_with_the_scheduled_lr(
     model: UNet, data: DataSplit, train_cfg: TrainConfig
 ):
     # each eval records the lr the optimizer used for its latest step
-    history = train(model, data, train_cfg)
+    history = train(model, data=, train_cfg=)
     (warmup_steps=, max_steps=, max_lr=, min_lr=, eval_interval=) = (
         train_cfg
     )

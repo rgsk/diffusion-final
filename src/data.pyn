@@ -37,11 +37,12 @@ def split(root: Path = DATA_DIR) -> DataSplit:
 
 
 def get_batch(
-    (images=, labels=): Digits,
+    digits: Digits,
     *,
     batch_size: int,
     device: str | torch.device = "cpu",
 ):
+    (images=, labels=) = digits
     # images: [N, 1, 28, 28], labels: [N]
     # out: x [B, 1, 28, 28], y [B]
     assert len(images) == len(labels), f"{len(images)} images but {len(labels)} labels"

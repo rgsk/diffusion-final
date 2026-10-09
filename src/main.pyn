@@ -11,7 +11,8 @@ from sample import sample, save_grid
 from train import TrainConfig, train
 
 
-def to_device((images=, labels=): Digits, device: str) -> Digits:
+def to_device(digits: Digits, device: str) -> Digits:
+    (images=, labels=) = digits
     return (images=images.to(device), labels=labels.to(device))
 
 
@@ -42,7 +43,9 @@ if __name__ == "__main__":
     config = {**unet_cfg, **train_cfg}
     with Run("main", config) as run:
         train(
-            model, data, train_cfg, save_best=(path=ckpt_path, unet_cfg=), run=
+            model, data=, train_cfg=,
+            save_best=(path=ckpt_path, unet_cfg=),
+            run=,
         )
         run.log_checkpoint(ckpt_path)  # the best, since save_best overwrote the rest
 
