@@ -127,7 +127,7 @@ def test_evaluation_restores_mode(model: UNet, data: DataSplit, training: bool):
     assert model.training is training
 
 
-# lr_at's settings; spread into it as **lr_cfg. Steps 0 .. 99 run, with warmup
+# lr_at's schedule, passed as schedule=lr_cfg. Steps 0 .. 99 run, with warmup
 # on 0 .. 4 and decay on 5 .. 99
 lr_cfg = (warmup_steps=5, max_steps=100, max_lr=1e-2, min_lr=1e-3)
 
@@ -135,25 +135,25 @@ lr_cfg = (warmup_steps=5, max_steps=100, max_lr=1e-2, min_lr=1e-3)
 def test_warmup_starts_at_one_step_and_reaches_max_lr():
     (warmup_steps=, max_lr=) = lr_cfg
     # step 0 already takes one warmup step, so the lr is 1e-2 / 5
-    assert lr_at(0, **lr_cfg) == max_lr / warmup_steps
-    assert lr_at(0, **lr_cfg) == 2.0e-3
-    assert lr_at(warmup_steps - 1, **lr_cfg) == pytest.approx(max_lr)
+    assert lr_at(0, schedule=lr_cfg) == max_lr / warmup_steps
+    assert lr_at(0, schedule=lr_cfg) == 2.0e-3
+    assert lr_at(warmup_steps - 1, schedule=lr_cfg) == pytest.approx(max_lr)
 
 
 def test_decay_starts_at_max_lr_and_ends_at_min_lr():
     (warmup_steps=, max_steps=, max_lr=, min_lr=) = lr_cfg
     # no jump where warmup ends
-    assert lr_at(warmup_steps, **lr_cfg) == pytest.approx(max_lr)
+    assert lr_at(warmup_steps, schedule=lr_cfg) == pytest.approx(max_lr)
     last_step = max_steps - 1
     # the last step that runs. cos(pi) is exactly -1, so exactly min_lr
-    assert lr_at(last_step, **lr_cfg) == min_lr
-    assert lr_at(max_steps, **lr_cfg) == min_lr  # past the run, it stays there
+    assert lr_at(last_step, schedule=lr_cfg) == min_lr
+    assert lr_at(max_steps, schedule=lr_cfg) == min_lr  # past the run, it stays there
 
 
 def test_lr_rises_through_warmup_then_only_falls():
     (warmup_steps=, max_steps=) = lr_cfg
-    warmup = [lr_at(s, **lr_cfg) for s in range(warmup_steps)]
-    decay = [lr_at(s, **lr_cfg) for s in range(warmup_steps, max_steps)]
+    warmup = [lr_at(s, schedule=lr_cfg) for s in range(warmup_steps)]
+    decay = [lr_at(s, schedule=lr_cfg) for s in range(warmup_steps, max_steps)]
     assert all(a < b for a, b in pairwise(warmup))
     assert all(a > b for a, b in pairwise(decay))
 
@@ -161,7 +161,7 @@ def test_lr_rises_through_warmup_then_only_falls():
 def test_cosine_is_halfway_at_the_midpoint_of_decay():
     (warmup_steps=, max_steps=, max_lr=, min_lr=) = lr_cfg
     midpoint = (warmup_steps + max_steps - 1) // 2  # 52, halfway through 5 .. 99
-    assert lr_at(midpoint, **lr_cfg) == pytest.approx((max_lr + min_lr) / 2)
+    assert lr_at(midpoint, schedule=lr_cfg) == pytest.approx((max_lr + min_lr) / 2)
 
 
 def test_warmup_must_leave_steps_to_decay():
@@ -170,7 +170,7 @@ def test_warmup_must_leave_steps_to_decay():
     with pytest.raises(
         AssertionError, match="warmup_steps 10 leaves no decay before step 10"
     ):
-        lr_at(0, **no_decay)
+        lr_at(0, schedule=no_decay)
 
 
 def test_weights_decay_and_biases_and_norms_dont(model: UNet):
@@ -255,15 +255,10 @@ def test_train_steps_with_the_scheduled_lr(
 ):
     # each eval records the lr the optimizer used for its latest step
     history = train(model, data=, train_cfg=)
-    (warmup_steps=, max_steps=, max_lr=, min_lr=, eval_interval=) = (
-        train_cfg
-    )
+    (max_steps=, eval_interval=) = train_cfg
     # an eval inside the loop follows setting its step's lr; the final eval, after
     # the loop, still holds the last step's (max_steps - 1)
     lr_steps = [*range(0, max_steps, eval_interval), max_steps - 1]
-    expected = [
-        lr_at(s, warmup_steps=, max_steps=, max_lr=, min_lr=)
-        for s in lr_steps
-    ]
+    expected = [lr_at(s, schedule=train_cfg) for s in lr_steps]
     assert [h.lr for h in history] == pytest.approx(expected)
     assert lr_steps == [0, 20, 40, 59]

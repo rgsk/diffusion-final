@@ -30,8 +30,11 @@ VAL_SEED = 0
 
 
 def lr_at(
-    step: int, *, warmup_steps: int, max_steps: int, max_lr: float, min_lr: float
+    step: int,
+    *,
+    schedule: (..., warmup_steps: int, max_steps: int, max_lr: float, min_lr: float),
 ) -> float:
+    (warmup_steps=, max_steps=, max_lr=, min_lr=) = schedule
     # linear warmup to max_lr, then cosine decay to min_lr on the last step train
     # runs (max_steps - 1), so min_lr is the lr the run ends with
     last_step = max_steps - 1
@@ -152,8 +155,8 @@ def train(
     # AdamW, evaluated every eval_interval steps and once at the end
     (train_data=, val_data=) = data
     (
-        batch_size=, max_steps=, max_lr=, min_lr=, weight_decay=, grad_clip=,
-        warmup_steps=, eval_interval=, eval_iters=,
+        batch_size=, max_steps=, max_lr=, weight_decay=, grad_clip=,
+        eval_interval=, eval_iters=,
     ) = train_cfg
     groups = param_groups(model, weight_decay=)
     opt = torch.optim.AdamW(groups, lr=max_lr)  # lr overwritten each step
@@ -200,7 +203,7 @@ def train(
 
     model.train()
     for step in range(max_steps):
-        lr = lr_at(step, warmup_steps=, max_steps=, max_lr=, min_lr=)
+        lr = lr_at(step, schedule=train_cfg)
         for group in opt.param_groups:
             group["lr"] = lr
         if step % eval_interval == 0:
