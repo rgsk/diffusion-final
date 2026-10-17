@@ -14,12 +14,13 @@ from flow import FlowBatch, flow_batch
 from logger import EvalRow, Run
 from model import UNet, UNetConfig
 
+# the lr over a run, and the run's length, since training stops when the schedule ends
+type Schedule = (warmup_steps: int, max_steps: int, max_lr: float, min_lr: float)
 type TrainConfig = (
-    batch_size: int, max_steps: int,
-    max_lr: float, min_lr: float,
+    batch_size: int,
+    schedule: Schedule,
     weight_decay: float,
     grad_clip: float,
-    warmup_steps: int,
     eval_interval: int,
     eval_iters: int,
 )
@@ -29,11 +30,7 @@ type TrainConfig = (
 VAL_SEED = 0
 
 
-def lr_at(
-    step: int,
-    *,
-    schedule: (..., warmup_steps: int, max_steps: int, max_lr: float, min_lr: float),
-) -> float:
+def lr_at(step: int, *, schedule: Schedule) -> float:
     (warmup_steps=, max_steps=, max_lr=, min_lr=) = schedule
     # linear warmup to max_lr, then cosine decay to min_lr on the last step train
     # runs (max_steps - 1), so min_lr is the lr the run ends with
@@ -49,6 +46,17 @@ def lr_at(
     progress = (step - warmup_steps) / (last_step - warmup_steps)  # 0 -> 1
     cosine = 0.5 * (1 + math.cos(math.pi * progress))  # 1 -> 0
     return min_lr + cosine * (max_lr - min_lr)
+
+
+def flat_config(train_cfg: TrainConfig) -> dict[str, Any]:
+    # every setting at the top level, the schedule's fields included, for the
+    # run log and wandb, which write plain JSON. _asdict() would keep schedule
+    # as a record, which json.dumps can't write
+    # TODO: remove once byname can turn nested records into plain dicts, which
+    # _asdict() doesn't because it's shallow (pending byname feedback). Then
+    # pass that to Run instead
+    (schedule=, **rest) = train_cfg
+    return {**rest, **schedule}
 
 
 def param_groups(model: UNet, *, weight_decay: float) -> list[dict[str, Any]]:
@@ -155,8 +163,8 @@ def train(
     # AdamW, evaluated every eval_interval steps and once at the end
     (train_data=, val_data=) = data
     (
-        batch_size=, max_steps=, max_lr=, weight_decay=, grad_clip=,
-        eval_interval=, eval_iters=,
+        batch_size=, schedule=, schedule=(max_steps=, max_lr=), weight_decay=,
+        grad_clip=, eval_interval=, eval_iters=,
     ) = train_cfg
     groups = param_groups(model, weight_decay=)
     opt = torch.optim.AdamW(groups, lr=max_lr)  # lr overwritten each step
@@ -203,7 +211,7 @@ def train(
 
     model.train()
     for step in range(max_steps):
-        lr = lr_at(step, schedule=train_cfg)
+        lr = lr_at(step, schedule=)
         for group in opt.param_groups:
             group["lr"] = lr
         if step % eval_interval == 0:
@@ -231,11 +239,10 @@ if __name__ == "__main__":
         in_channels=1, channels=(32, 64, 64), time_dim=128, groups=8
     )
     train_cfg: TrainConfig = (
-        batch_size=128, max_steps=500,
-        max_lr=2e-3, min_lr=2e-4,
+        batch_size=128,
+        schedule=(warmup_steps=50, max_steps=500, max_lr=2e-3, min_lr=2e-4),
         weight_decay=0.0,
         grad_clip=1.0,
-        warmup_steps=50,
         eval_interval=100,
         eval_iters=10,
     )

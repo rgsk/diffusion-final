@@ -8,7 +8,7 @@ from logger import Run
 from model import UNet, UNetConfig
 from paths import CKPT_DIR, ROOT, SAMPLES_DIR
 from sample import sample, save_grid
-from train import TrainConfig, train
+from train import TrainConfig, flat_config, train
 
 
 def to_device(digits: Digits, device: str) -> Digits:
@@ -31,16 +31,17 @@ if __name__ == "__main__":
         in_channels=1, channels=(64, 128, 128), time_dim=256, groups=8
     )
     train_cfg: TrainConfig = (
-        batch_size=128, max_steps=10_000,
-        max_lr=2e-3, min_lr=2e-4,
-        weight_decay=0.0, grad_clip=1.0,
-        warmup_steps=200,
-        eval_interval=500, eval_iters=20,
+        batch_size=128,
+        schedule=(warmup_steps=200, max_steps=10_000, max_lr=2e-3, min_lr=2e-4),
+        weight_decay=0.0,
+        grad_clip=1.0,
+        eval_interval=500,
+        eval_iters=20,
     )
     model = UNet(unet_cfg).to(device)
     ckpt_path = CKPT_DIR / "main.pt"
     # every hyperparameter, for wandb's config table
-    config = {**unet_cfg, **train_cfg}
+    config = {**unet_cfg, **flat_config(train_cfg)}
     with Run("main", config) as run:
         train(
             model, data=, train_cfg=,
@@ -62,4 +63,4 @@ if __name__ == "__main__":
             save_grid(sample(model, noise, steps=), path)
             grids[f"samples/steps_{steps}"] = path
             print(f"saved {path.relative_to(ROOT)}")
-        run.log_images(grids, step=train_cfg.max_steps)
+        run.log_images(grids, step=train_cfg.schedule.max_steps)

@@ -46,11 +46,10 @@ def data() -> DataSplit:
 def train_cfg() -> TrainConfig:
     # a short run on data's 4 repeated images, about a second on CPU
     return (
-        batch_size=16, max_steps=60,
-        max_lr=1e-2, min_lr=1e-3,
+        batch_size=16,
+        schedule=(warmup_steps=5, max_steps=60, max_lr=1e-2, min_lr=1e-3),
         weight_decay=0.1,
         grad_clip=1.0,
-        warmup_steps=5,
         eval_interval=20,
         eval_iters=5,
     )

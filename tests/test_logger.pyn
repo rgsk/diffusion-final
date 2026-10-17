@@ -13,7 +13,7 @@ from data import DataSplit
 from logger import EvalRow, Run
 from model import UNet
 from sample import save_grid
-from train import TrainConfig, train
+from train import TrainConfig, flat_config, train
 
 
 def read_lines(run: Run) -> list[dict[str, Any]]:
@@ -71,7 +71,7 @@ def test_exiting_the_block_finishes_the_run(tmp_path: Path):
 def test_train_logs_every_eval_and_a_summary(
     model: UNet, data: DataSplit, train_cfg: TrainConfig, tmp_path: Path
 ):
-    with Run("test", dict(train_cfg), online=False, log_dir=tmp_path) as run:
+    with Run("test", flat_config(train_cfg), online=False, log_dir=tmp_path) as run:
         history = train(model, data=, train_cfg=, run=)
     _, *logs, summary, _ = read_lines(run)
     # one line per history row, same step and val loss

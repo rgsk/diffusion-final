@@ -11,6 +11,7 @@ from data import DataSplit, get_batch
 from flow import flow_batch
 from model import UNet
 from train import (
+    Schedule,
     TrainConfig,
     autocast,
     batch_loss,
@@ -129,7 +130,7 @@ def test_evaluation_restores_mode(model: UNet, data: DataSplit, training: bool):
 
 # lr_at's schedule, passed as schedule=lr_cfg. Steps 0 .. 99 run, with warmup
 # on 0 .. 4 and decay on 5 .. 99
-lr_cfg = (warmup_steps=5, max_steps=100, max_lr=1e-2, min_lr=1e-3)
+lr_cfg: Schedule = (warmup_steps=5, max_steps=100, max_lr=1e-2, min_lr=1e-3)
 
 
 def test_warmup_starts_at_one_step_and_reaches_max_lr():
@@ -225,7 +226,7 @@ def test_history_has_one_entry_per_eval(
     model: UNet, data: DataSplit, train_cfg: TrainConfig
 ):
     history = train(model, data=, train_cfg=)
-    (max_steps=, eval_interval=) = train_cfg
+    (schedule=(max_steps=), eval_interval=) = train_cfg
     # every eval_interval steps inside the loop, then once more after the last step
     eval_steps = [*range(0, max_steps, eval_interval), max_steps]
     assert [h.step for h in history] == eval_steps
@@ -255,10 +256,10 @@ def test_train_steps_with_the_scheduled_lr(
 ):
     # each eval records the lr the optimizer used for its latest step
     history = train(model, data=, train_cfg=)
-    (max_steps=, eval_interval=) = train_cfg
+    (schedule=(max_steps=), eval_interval=) = train_cfg
     # an eval inside the loop follows setting its step's lr; the final eval, after
     # the loop, still holds the last step's (max_steps - 1)
     lr_steps = [*range(0, max_steps, eval_interval), max_steps - 1]
-    expected = [lr_at(s, schedule=train_cfg) for s in lr_steps]
+    expected = [lr_at(s, schedule=train_cfg.schedule) for s in lr_steps]
     assert [h.lr for h in history] == pytest.approx(expected)
     assert lr_steps == [0, 20, 40, 59]
