@@ -15,9 +15,9 @@
     "tasks": [
         {
             "label": "check: current file",
-            "detail": "ruff + basedpyright on the open .pyn, .py or .ipynb through byname tool (byname notebooks translated); .pyn also gets any-check (../ml-tools)",
+            "detail": "ruff + basedpyright on the open .pyn, .py or .ipynb through byname tool (byname notebooks translated); .pyn also gets any-check and any-check --redundant (../ml-tools)",
             "type": "shell",
-            "command": "F=$(echo '${file}' | cut -d'#' -f1); echo \"checking $F\"; echo; case \"$F\" in *.pyn|*.py|*.ipynb) ;; *) echo 'not a .pyn, .py or .ipynb file'; exit 0;; esac; echo '─── ruff ───'; uv run byname tool ruff check --output-format=concise \"$F\" && echo '✅ ruff ok'; echo; echo '─── basedpyright ───'; uv run byname tool basedpyright \"$F\" && echo '✅ basedpyright ok'; echo; case \"$F\" in *.pyn) echo '─── untyped names (Any) ───'; uv run any-check \"$F\" && echo '✅ no Any names'; echo;; esac",
+            "command": "F=$(echo '${file}' | cut -d'#' -f1); echo \"checking $F\"; echo; case \"$F\" in *.pyn|*.py|*.ipynb) ;; *) echo 'not a .pyn, .py or .ipynb file'; exit 0;; esac; echo '─── ruff ───'; uv run byname tool ruff check --output-format=concise \"$F\" && echo '✅ ruff ok'; echo; echo '─── basedpyright ───'; uv run byname tool basedpyright \"$F\" && echo '✅ basedpyright ok'; echo; case \"$F\" in *.pyn) echo '─── untyped names (Any) ───'; uv run any-check \"$F\" && echo '✅ no Any names'; echo; echo '─── redundant annotations ───'; uv run any-check --redundant \"$F\" && echo '✅ no redundant annotations'; echo;; esac",
             "problemMatcher": []
         }
     ]

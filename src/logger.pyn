@@ -108,7 +108,7 @@ class Run:
         # namespaced names, so wandb groups loss/*, grad/*, time/* and memory/* into
         # sections. Not system/*, because that section charts only the metrics
         # wandb collects itself
-        metrics: dict[str, float] = {
+        metrics = {
             "loss/train": train_loss,
             "loss/val": val_loss,
             "lr": lr,
